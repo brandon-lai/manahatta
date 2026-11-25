@@ -8,7 +8,6 @@
   --font-heading: var(--font-display);
   --font-display: var(--font-display);
   --font-sans: var(--font-sans);
-  --font-hand: var(--font-hand);
   --color-ring: var(--ring);
   --color-input: var(--input);
   --color-border: var(--border);
@@ -145,10 +144,6 @@
   font-size: clamp(2.15rem, 4.8vw, 3.5rem);
   line-height: 1.08;
   letter-spacing: -0.025em;
-}
-
-.skyline-hand {
-  font-family: var(--font-hand);
 }
 
 .skyline-serif {

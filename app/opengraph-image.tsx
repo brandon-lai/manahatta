@@ -2,7 +2,7 @@ import { ImageResponse } from "next/og"
 import { OG_PALETTE } from "@/lib/skyline/og-palette"
 
 export const alt =
-  "Manahatta: Four centuries of the Manhattan skyline rising along the East River from 1609 to 2026"
+  "Horizons: Five iconic world skylines — New York, Paris, London, Tokyo, and Hong Kong — rising across centuries"
 export const size = { width: 1200, height: 630 }
 export const contentType = "image/png"
 
@@ -52,15 +52,42 @@ export default function OpenGraphImage() {
         />
 
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          <div style={{ fontSize: 22, color: OG_PALETTE.tungsten, letterSpacing: 1 }}>
-            40.7128° N, 74.0060° W, East River Elevation
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 14,
+              fontSize: 21,
+              color: OG_PALETTE.tungsten,
+            }}
+          >
+            {["New York", "Paris", "London", "Tokyo", "Hong Kong"].map(
+              (city, idx) => (
+                <div
+                  key={city}
+                  style={{ display: "flex", alignItems: "center", gap: 14 }}
+                >
+                  {idx > 0 && (
+                    <div
+                      style={{
+                        width: 1,
+                        height: 16,
+                        background: OG_PALETTE.tungsten,
+                        opacity: 0.4,
+                      }}
+                    />
+                  )}
+                  <div>{city}</div>
+                </div>
+              )
+            )}
           </div>
           <div style={{ fontSize: 78, fontFamily: "Georgia, serif", lineHeight: 1.02 }}>
-            Manahatta
+            Horizons
           </div>
           <div style={{ fontSize: 26, color: OG_PALETTE.parchmentMuted, maxWidth: 680 }}>
-            Four centuries of Manhattan rising in twenty-five seconds, scored to
-            music.
+            Five world skylines rising across centuries along their rivers and
+            harbors.
           </div>
         </div>
 
@@ -112,7 +139,7 @@ export default function OpenGraphImage() {
               color: OG_PALETTE.parchmentDim,
             }}
           >
-            <span>1609 to 2026</span>
+            <span>1078 to 2026</span>
             <span>Interactive Skyline &amp; Nocturnal Tour</span>
           </div>
         </div>

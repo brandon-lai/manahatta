@@ -25,16 +25,18 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip"
 import {
-  BRIDGES,
+  CITIES,
+  CITY_MAP,
+  type CityConfig,
+  type CityId,
+  DEFAULT_CITY_ID,
+  ENGINE_CFG,
+  eraLabelForCity,
   FADE_SECONDS,
-  GREETING_HOLD,
-  HEROES,
   INTRO_SECONDS,
-  MILESTONES,
-  progressAtYear,
-  TOUR_STOPS,
+  progressAtYearForCity,
+  resolveCityId,
   tourScrollProgressForStop,
-  WRITE_TAIL,
 } from "@/lib/skyline/data"
 import { clamp } from "@/lib/skyline/math"
 import {
@@ -47,18 +49,19 @@ import { cn } from "@/lib/utils"
 
 const AUDIO_SRC = "/audio/nyc.mp3"
 
-const INITIAL_HUD: HudSnapshot = {
-  p: 0,
-  q: 0,
-  year: 1609,
-  era: "Lenape & Dutch Shore",
-  caption: "1609 — Manahatta, before the grid",
-  touring: false,
-  activeStopIndex: 0,
-  stopOpacities: TOUR_STOPS.map(() => 0),
-  greetAlpha: 0,
-  spotlightId: null,
-  handoverHint: false,
+function initialHudForCity(city: CityConfig): HudSnapshot {
+  return {
+    p: 0,
+    q: 0,
+    year: city.startYear,
+    era: eraLabelForCity(city, city.startYear, false),
+    caption: city.events[0]?.text ?? city.tagline,
+    touring: false,
+    activeStopIndex: 0,
+    stopOpacities: city.tourStops.map(() => 0),
+    spotlightId: null,
+    handoverHint: false,
+  }
 }
 
 export function SkylineExperience() {
@@ -77,17 +80,25 @@ export function SkylineExperience() {
   const driveRafRef = React.useRef(0)
   const driveStartRef = React.useRef(0)
   const driveOffsetSecRef = React.useRef(0)
-  const tailStartRef = React.useRef<number | null>(null)
   const scrollDrivenByAudioRef = React.useRef(false)
   const pendingJumpRef = React.useRef<{ p: number; q: number } | null>(null)
   const mutedRef = React.useRef(false)
+
+  const [cityId, setCityId] = React.useState<CityId>(DEFAULT_CITY_ID)
+  const activeCity = CITY_MAP[cityId]
+  const activeCityRef = React.useRef<CityConfig>(activeCity)
+  React.useEffect(() => {
+    activeCityRef.current = activeCity
+  }, [activeCity])
 
   const [entered, setEntered] = React.useState(false)
   const [playing, setPlaying] = React.useState(false)
   const [muted, setMuted] = React.useState(false)
   const [atlasOpen, setAtlasOpen] = React.useState(false)
   const [spotlight, setSpotlight] = React.useState<SpotlightTarget | null>(null)
-  const [hud, setHud] = React.useState<HudSnapshot>(INITIAL_HUD)
+  const [hud, setHud] = React.useState<HudSnapshot>(() =>
+    initialHudForCity(CITY_MAP[DEFAULT_CITY_ID])
+  )
 
   const getIntroMax = React.useCallback(
     () => spacerRef.current?.offsetHeight ?? 0,
@@ -180,16 +191,12 @@ export function SkylineExperience() {
       cancelAnimationFrame(driveRafRef.current)
       drivingRef.current = true
       setPlaying(true)
-      tailStartRef.current = null
       driveStartRef.current = performance.now()
       driveOffsetSecRef.current = startOffsetSec
 
       const step = () => {
         if (!drivingRef.current) return
         const audio = audioRef.current
-        const introMax = getIntroMax()
-        const tourMax = getTourMax()
-        const holdPx = GREETING_HOLD * tourMax
 
         let elapsedSec: number
         if (useAudioClock && audio && !audio.paused && !Number.isNaN(audio.currentTime)) {
@@ -239,20 +246,9 @@ export function SkylineExperience() {
             audio.pause()
             audio.volume = mutedRef.current ? 0 : 1
           }
-          if (tailStartRef.current === null) {
-            tailStartRef.current = performance.now()
-          }
-          const tailFrac = clamp(
-            (performance.now() - tailStartRef.current) / (WRITE_TAIL * 1000),
-            0,
-            1
-          )
-          const q = introMax > 0 ? clamp((holdPx * tailFrac) / Math.max(1, tourMax), 0, 1) : 0
-          scrollToProgress(1, q)
-          if (tailFrac >= 1) {
-            stopPlayback(false)
-            return
-          }
+          scrollToProgress(1, 0)
+          stopPlayback(false)
+          return
         }
 
         driveRafRef.current = requestAnimationFrame(step)
@@ -260,7 +256,7 @@ export function SkylineExperience() {
 
       driveRafRef.current = requestAnimationFrame(step)
     },
-    [getIntroMax, getTourMax, scrollToProgress, stopPlayback]
+    [scrollToProgress, stopPlayback]
   )
 
   const beginExperience = React.useCallback(
@@ -299,6 +295,40 @@ export function SkylineExperience() {
       }
     },
     [ensureAudio, scrollToProgress, startDriveLoop]
+  )
+
+  const handleSelectCity = React.useCallback(
+    (nextId: CityId) => {
+      if (nextId === cityId) return
+      const nextCity = CITY_MAP[nextId]
+      setCityId(nextId)
+      setSpotlight(null)
+      controllerRef.current?.setCity(nextCity)
+
+      // Keep URL query param cleanly updated without navigation flash
+      if (typeof window !== "undefined") {
+        const url = new URL(window.location.href)
+        if (nextId === DEFAULT_CITY_ID) url.searchParams.delete("city")
+        else url.searchParams.set("city", nextId)
+        window.history.replaceState({}, "", url.toString())
+      }
+
+      if (!entered) {
+        setHud(initialHudForCity(nextCity))
+        controllerRef.current?.setProgress(0.95, 0, true)
+        return
+      }
+
+      if (drivingRef.current) {
+        // If actively watching the timelapse, restart smoothly for the new city
+        beginExperience(!mutedRef.current)
+      } else {
+        // Show the new city's full panoramic skyline at the current diurnal time
+        const nextP = hud.touring ? 0.98 : clamp(hud.p, 0, 1)
+        scrollToProgress(nextP, 0, true)
+      }
+    },
+    [beginExperience, cityId, entered, hud.p, hud.touring, scrollToProgress]
   )
 
   const togglePlayPause = React.useCallback(() => {
@@ -373,7 +403,10 @@ export function SkylineExperience() {
       stopPlayback(true)
       setSpotlight(null)
       controllerRef.current?.setSpotlight(null)
-      const q = tourScrollProgressForStop(stopIndex)
+      const q = tourScrollProgressForStop(
+        stopIndex,
+        activeCityRef.current.tourStops.length
+      )
       scrollToProgress(1, q)
     },
     [scrollToProgress, stopPlayback]
@@ -395,17 +428,21 @@ export function SkylineExperience() {
     controllerRef.current?.setSpotlight(null)
   }, [])
 
-  // Mount canvas renderer & handle URL jump params (?p=0.58&gate=0, ?q=0.45)
+  // Mount canvas renderer & handle URL jump params (?city=paris&p=0.95&gate=0, ?q=0.45)
   React.useEffect(() => {
     const canvas = canvasRef.current
     if (!canvas) return
 
-    const ctrl = initSkylineRenderer(canvas, (snapshot) => {
+    const params = new URLSearchParams(window.location.search)
+    const initialCityId = resolveCityId(params.get("city"))
+    const initialCity = CITY_MAP[initialCityId]
+    activeCityRef.current = initialCity
+
+    const ctrl = initSkylineRenderer(canvas, initialCity, (snapshot) => {
       setHud(snapshot)
     })
     controllerRef.current = ctrl
 
-    const params = new URLSearchParams(window.location.search)
     const pParam = params.get("p")
     const qParam = params.get("q")
     const gateParam = params.get("gate")
@@ -415,10 +452,21 @@ export function SkylineExperience() {
       const qVal = qParam !== null ? clamp(parseFloat(qParam) || 0, 0, 1) : 0
       pendingJumpRef.current = { p: pVal, q: qVal }
       requestAnimationFrame(() => {
+        if (initialCityId !== DEFAULT_CITY_ID) {
+          setCityId(initialCityId)
+          setHud(initialHudForCity(initialCity))
+        }
         setEntered(true)
       })
     } else {
-      syncScrollToRenderer(true)
+      if (initialCityId !== DEFAULT_CITY_ID) {
+        requestAnimationFrame(() => {
+          setCityId(initialCityId)
+          setHud(initialHudForCity(initialCity))
+        })
+      }
+      // Show a preview of the chosen city's twilight skyline behind the gate curtain
+      ctrl.setProgress(0.92, 0, true)
     }
 
     return () => {
@@ -507,6 +555,14 @@ export function SkylineExperience() {
 
       if (atlasOpen) return
 
+      // Number keys 1..5 switch world cities immediately
+      const digit = Number(e.key)
+      if (digit >= 1 && digit <= CITIES.length) {
+        e.preventDefault()
+        handleSelectCity(CITIES[digit - 1].id)
+        return
+      }
+
       const lower = e.key.toLowerCase()
       if (lower === "m") {
         e.preventDefault()
@@ -522,7 +578,9 @@ export function SkylineExperience() {
         togglePlayPause()
       } else if (e.key === "ArrowRight" && hud.touring) {
         e.preventDefault()
-        handleJumpToTourStop(Math.min(TOUR_STOPS.length - 1, hud.activeStopIndex + 1))
+        handleJumpToTourStop(
+          Math.min(activeCity.tourStops.length - 1, hud.activeStopIndex + 1)
+        )
       } else if (e.key === "ArrowLeft" && hud.touring) {
         e.preventDefault()
         handleJumpToTourStop(Math.max(0, hud.activeStopIndex - 1))
@@ -532,12 +590,14 @@ export function SkylineExperience() {
     window.addEventListener("keydown", onKeyDown)
     return () => window.removeEventListener("keydown", onKeyDown)
   }, [
+    activeCity.tourStops.length,
     atlasOpen,
     beginExperience,
     clearSpotlight,
     entered,
     handleJumpToTourStop,
     handleReplay,
+    handleSelectCity,
     hud.activeStopIndex,
     hud.touring,
     spotlight,
@@ -547,7 +607,7 @@ export function SkylineExperience() {
 
   const spotlightMeta = React.useMemo(() => {
     if (!spotlight) return null
-    const hero = HEROES.find((h) => h.id === spotlight.id)
+    const hero = activeCity.heroes.find((h) => h.id === spotlight.id)
     if (hero) {
       return {
         name: hero.name,
@@ -555,23 +615,23 @@ export function SkylineExperience() {
         summary: hero.summary,
       }
     }
-    const bridge = BRIDGES.find((b) => b.id === spotlight.id)
+    const bridge = activeCity.bridges.find((b) => b.id === spotlight.id)
     if (bridge) {
       return {
         name: bridge.name,
-        meta: `${bridge.built}, ${bridge.towerH} ft towers, East River`,
+        meta: `${bridge.built}, ${bridge.towerH} ft span, ${activeCity.waterbody}`,
         summary: bridge.summary,
       }
     }
     return null
-  }, [spotlight])
+  }, [activeCity, spotlight])
 
   return (
     <div className="relative min-h-dvh w-full bg-background text-foreground">
       {/* Sticky full-bleed skyline canvas */}
       <canvas
         ref={canvasRef}
-        aria-label="Animated Manhattan skyline from 1609 to 2026 along the East River"
+        aria-label={`Animated ${activeCity.name} skyline from ${activeCity.startYear} to ${activeCity.endYear} along ${activeCity.waterbody}`}
         className="fixed inset-0 z-0 block h-dvh w-full"
       />
 
@@ -598,19 +658,45 @@ export function SkylineExperience() {
         <div className="max-w-xl space-y-6">
           <div className="space-y-3">
             <p className="text-xs font-medium text-primary/95 tracking-normal">
-              40.7128° N, 74.0060° W, East River View
+              {activeCity.coordinates}, {activeCity.waterbody}
             </p>
             <h1 className="skyline-gate-title skyline-text-shadow font-normal text-foreground">
-              Manahatta
+              {activeCity.name}
             </h1>
-            <p className="skyline-serif skyline-text-shadow text-base sm:text-lg leading-relaxed text-foreground/86 max-w-md mx-auto">
-              Four centuries of Manhattan rising along the river in twenty-five
-              seconds, scored to music, followed by a walk through the city at
-              night.
+            <p className="skyline-serif skyline-text-shadow text-base sm:text-lg leading-relaxed text-foreground/88 max-w-md mx-auto">
+              {activeCity.tagline}
             </p>
           </div>
 
-          <div className="flex flex-col sm:flex-row items-center justify-center gap-3 pt-2">
+          {/* City selector pills on gate */}
+          <div
+            role="group"
+            aria-label="Choose a world city"
+            className="flex flex-wrap items-center justify-center gap-1.5 pt-1"
+          >
+            {CITIES.map((c) => {
+              const selected = c.id === cityId
+              return (
+                <button
+                  key={c.id}
+                  type="button"
+                  disabled={entered}
+                  aria-pressed={selected}
+                  onClick={() => handleSelectCity(c.id)}
+                  className={cn(
+                    "min-h-10 whitespace-nowrap rounded-full border px-4 text-xs font-medium transition-[background-color,border-color,color,transform] duration-150 ease-[var(--ease-out)] enabled:active:scale-[0.96] motion-reduce:transition-none",
+                    selected
+                      ? "border-border-strong bg-primary text-primary-foreground"
+                      : "border-border bg-card text-foreground/86 hover:border-border-strong hover:text-foreground"
+                  )}
+                >
+                  {c.name}
+                </button>
+              )
+            })}
+          </div>
+
+          <div className="flex flex-col sm:flex-row items-center justify-center gap-3 pt-1">
             <Button
               ref={enterBtnRef}
               type="button"
@@ -637,135 +723,203 @@ export function SkylineExperience() {
         </div>
       </div>
 
-      {/* Top Navigation & Controls (Post-Gate) */}
+      {/* Top Navigation, City Switcher & Controls (Post-Gate) */}
       {entered && (
-        <header className="fixed inset-x-0 top-0 z-30 flex items-center justify-between gap-3 px-4 py-4 sm:px-7 sm:py-5 pointer-events-none">
-          {/* Top-left subtle architectural wordmark + era */}
-          <div className="pointer-events-auto flex items-center gap-3 min-w-0">
-            <button
-              type="button"
-              onClick={() => handleScrubYearProgress(0)}
-              className="skyline-serif skyline-text-shadow text-lg sm:text-xl text-foreground hover:text-primary transition-colors duration-150 rounded-md px-1.5 py-1 min-h-11 inline-flex items-center"
+        <header className="fixed inset-x-0 top-0 z-30 flex flex-col gap-2 px-4 py-3.5 sm:px-7 sm:py-4 pointer-events-none">
+          <div className="flex items-center justify-between gap-3">
+            {/* Top-left brand + active city era */}
+            <div className="pointer-events-auto flex items-center gap-2.5 min-w-0 shrink-0">
+              <button
+                type="button"
+                onClick={() => handleScrubYearProgress(0)}
+                className="skyline-serif skyline-text-shadow text-lg sm:text-xl text-foreground hover:text-primary transition-colors duration-150 rounded-md px-1.5 py-1 min-h-11 inline-flex items-center"
+              >
+                Horizons
+              </button>
+              <span
+                className="hidden xl:inline-flex items-center rounded-full border border-border bg-card px-3 py-1 text-xs font-medium text-foreground/92"
+                aria-label={`Current era: ${hud.era}`}
+              >
+                {hud.era}
+              </span>
+            </div>
+
+            {/* Center World City Switcher (Desktop/Tablet) */}
+            <nav
+              aria-label="World cities"
+              className="pointer-events-auto hidden md:flex items-center gap-0.5 lg:gap-1 rounded-full border border-border bg-card p-1 backdrop-blur-md shrink-0"
             >
-              Manahatta
-            </button>
-            <span
-              className="hidden sm:inline-flex items-center rounded-full border border-border bg-card px-3 py-1 text-xs font-medium text-foreground/92"
-              aria-label={`Current era: ${hud.era}`}
-            >
-              {hud.era}
-            </span>
+              {CITIES.map((c, idx) => {
+                const selected = c.id === cityId
+                return (
+                  <Tooltip key={c.id}>
+                    <TooltipTrigger
+                      render={
+                        <button
+                          type="button"
+                          aria-current={selected ? "page" : undefined}
+                          onClick={() => handleSelectCity(c.id)}
+                          className={cn(
+                            "min-h-9 whitespace-nowrap rounded-full px-2.5 lg:px-3.5 text-xs font-medium transition-[background-color,color,transform] duration-150 ease-[var(--ease-out)] active:scale-[0.96] motion-reduce:transition-none",
+                            selected
+                              ? "bg-primary text-primary-foreground"
+                              : "text-foreground/84 hover:text-foreground hover:bg-surface-elevated/60"
+                          )}
+                        />
+                      }
+                    >
+                      {c.name}
+                    </TooltipTrigger>
+                    <TooltipContent side="bottom">
+                      <span>
+                        {c.name}, {c.startYear} to {c.endYear}
+                      </span>
+                      <Kbd>{idx + 1}</Kbd>
+                    </TooltipContent>
+                  </Tooltip>
+                )
+              })}
+            </nav>
+
+            {/* Top-right shadcn control cluster */}
+            <div className="pointer-events-auto flex items-center gap-1.5 sm:gap-2 shrink-0">
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    <Button
+                      type="button"
+                      size="icon-sm"
+                      variant="outline"
+                      onClick={togglePlayPause}
+                      aria-label={
+                        playing ? "Pause skyline film" : "Play skyline film"
+                      }
+                      className="rounded-full"
+                    />
+                  }
+                >
+                  {playing ? (
+                    <Pause className="size-4" aria-hidden="true" />
+                  ) : (
+                    <Play className="size-4 translate-x-[0.5px]" aria-hidden="true" />
+                  )}
+                </TooltipTrigger>
+                <TooltipContent side="bottom">
+                  <span>{playing ? "Pause" : "Play"}</span>
+                  <Kbd>Space</Kbd>
+                </TooltipContent>
+              </Tooltip>
+
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    <Button
+                      type="button"
+                      size="icon-sm"
+                      variant="outline"
+                      onClick={toggleMute}
+                      aria-label={muted ? "Unmute soundtrack" : "Mute soundtrack"}
+                      className="rounded-full relative"
+                    />
+                  }
+                >
+                  {muted ? (
+                    <VolumeX className="size-4" aria-hidden="true" />
+                  ) : playing ? (
+                    <span
+                      className="inline-flex items-end gap-[2px] h-3.5"
+                      aria-hidden="true"
+                    >
+                      <span className="w-[2px] h-full rounded-full bg-primary eq-bar-1 origin-bottom" />
+                      <span className="w-[2px] h-full rounded-full bg-primary eq-bar-2 origin-bottom" />
+                      <span className="w-[2px] h-full rounded-full bg-primary eq-bar-3 origin-bottom" />
+                    </span>
+                  ) : (
+                    <Volume2 className="size-4" aria-hidden="true" />
+                  )}
+                </TooltipTrigger>
+                <TooltipContent side="bottom">
+                  <span>{muted ? "Unmute" : "Mute"}</span>
+                  <Kbd>M</Kbd>
+                </TooltipContent>
+              </Tooltip>
+
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    <Button
+                      type="button"
+                      size="icon-sm"
+                      variant="outline"
+                      onClick={handleReplay}
+                      aria-label={`Replay ${activeCity.name} from ${activeCity.startYear}`}
+                      className="rounded-full"
+                    />
+                  }
+                >
+                  <RotateCcw className="size-4" aria-hidden="true" />
+                </TooltipTrigger>
+                <TooltipContent side="bottom">
+                  <span>Replay from {activeCity.startYear}</span>
+                  <Kbd>R</Kbd>
+                </TooltipContent>
+              </Tooltip>
+
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      aria-label={`Open ${activeCity.name} Landmark Atlas`}
+                      onClick={() => setAtlasOpen(true)}
+                      className="rounded-full px-3.5 min-h-10"
+                    />
+                  }
+                >
+                  <Compass className="size-4 text-primary" aria-hidden="true" />
+                  <span className="hidden sm:inline">Atlas</span>
+                </TooltipTrigger>
+                <TooltipContent side="bottom">
+                  <span>Landmark Atlas</span>
+                  <Kbd>A</Kbd>
+                </TooltipContent>
+              </Tooltip>
+            </div>
           </div>
 
-          {/* Top-right shadcn control cluster */}
-          <div className="pointer-events-auto flex items-center gap-1.5 sm:gap-2">
-            <Tooltip>
-              <TooltipTrigger
-                render={
-                  <Button
-                    type="button"
-                    size="icon-sm"
-                    variant="outline"
-                    onClick={togglePlayPause}
-                    aria-label={playing ? "Pause skyline film" : "Play skyline film"}
-                    className="rounded-full"
-                  />
-                }
-              >
-                {playing ? (
-                  <Pause className="size-4" aria-hidden="true" />
-                ) : (
-                  <Play className="size-4 translate-x-[0.5px]" aria-hidden="true" />
-                )}
-              </TooltipTrigger>
-              <TooltipContent side="bottom">
-                <span>{playing ? "Pause" : "Play"}</span>
-                <Kbd>Space</Kbd>
-              </TooltipContent>
-            </Tooltip>
-
-            <Tooltip>
-              <TooltipTrigger
-                render={
-                  <Button
-                    type="button"
-                    size="icon-sm"
-                    variant="outline"
-                    onClick={toggleMute}
-                    aria-label={muted ? "Unmute soundtrack" : "Mute soundtrack"}
-                    className="rounded-full relative"
-                  />
-                }
-              >
-                {muted ? (
-                  <VolumeX className="size-4" aria-hidden="true" />
-                ) : playing ? (
-                  <span
-                    className="inline-flex items-end gap-[2px] h-3.5"
-                    aria-hidden="true"
-                  >
-                    <span className="w-[2px] h-full rounded-full bg-primary eq-bar-1 origin-bottom" />
-                    <span className="w-[2px] h-full rounded-full bg-primary eq-bar-2 origin-bottom" />
-                    <span className="w-[2px] h-full rounded-full bg-primary eq-bar-3 origin-bottom" />
-                  </span>
-                ) : (
-                  <Volume2 className="size-4" aria-hidden="true" />
-                )}
-              </TooltipTrigger>
-              <TooltipContent side="bottom">
-                <span>{muted ? "Unmute" : "Mute"}</span>
-                <Kbd>M</Kbd>
-              </TooltipContent>
-            </Tooltip>
-
-            <Tooltip>
-              <TooltipTrigger
-                render={
-                  <Button
-                    type="button"
-                    size="icon-sm"
-                    variant="outline"
-                    onClick={handleReplay}
-                    aria-label="Replay timelapse from 1609"
-                    className="rounded-full"
-                  />
-                }
-              >
-                <RotateCcw className="size-4" aria-hidden="true" />
-              </TooltipTrigger>
-              <TooltipContent side="bottom">
-                <span>Replay from 1609</span>
-                <Kbd>R</Kbd>
-              </TooltipContent>
-            </Tooltip>
-
-            <Tooltip>
-              <TooltipTrigger
-                render={
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="outline"
-                    aria-label="Open Skyline Atlas"
-                    onClick={() => setAtlasOpen(true)}
-                    className="rounded-full px-3.5 min-h-10"
-                  />
-                }
-              >
-                <Compass className="size-4 text-primary" aria-hidden="true" />
-                <span className="hidden sm:inline">Atlas</span>
-              </TooltipTrigger>
-              <TooltipContent side="bottom">
-                <span>Landmark Atlas</span>
-                <Kbd>A</Kbd>
-              </TooltipContent>
-            </Tooltip>
-          </div>
+          {/* Mobile horizontal city strip */}
+          <nav
+            aria-label="World cities"
+            className="pointer-events-auto flex md:hidden items-center justify-between gap-1 overflow-x-auto pb-0.5"
+          >
+            {CITIES.map((c) => {
+              const selected = c.id === cityId
+              return (
+                <button
+                  key={c.id}
+                  type="button"
+                  aria-current={selected ? "page" : undefined}
+                  onClick={() => handleSelectCity(c.id)}
+                  className={cn(
+                    "min-h-9 shrink-0 whitespace-nowrap rounded-full border px-2.5 text-[11.5px] font-medium transition-[background-color,border-color,color,transform] duration-150 ease-[var(--ease-out)] active:scale-[0.96] motion-reduce:transition-none",
+                    selected
+                      ? "border-border-strong bg-primary text-primary-foreground"
+                      : "border-border bg-card text-foreground/86 hover:border-border-strong hover:text-foreground"
+                  )}
+                >
+                  {c.name}
+                </button>
+              )
+            })}
+          </nav>
         </header>
       )}
 
-      {/* Open-Sky Editorial Story Layer during Nocturnal Tour */}
+      {/* Open-Sky Editorial Architectural Layer during Nocturnal Tour */}
       <TourOverlay
+        city={activeCity}
         visible={entered && hud.touring && !spotlight}
         activeIndex={hud.activeStopIndex}
         opacities={hud.stopOpacities}
@@ -775,7 +929,7 @@ export function SkylineExperience() {
       {entered && spotlightMeta && (
         <aside
           aria-label={`Spotlight: ${spotlightMeta.name}`}
-          className="fixed left-4 right-4 top-20 sm:left-7 sm:right-auto sm:max-w-md z-30 skyline-plate rounded-2xl p-4"
+          className="fixed left-4 right-4 top-28 md:top-20 sm:left-7 sm:right-auto sm:max-w-md z-30 skyline-plate rounded-2xl p-4"
         >
           <div className="flex items-start justify-between gap-3">
             <div className="space-y-1 min-w-0">
@@ -829,16 +983,16 @@ export function SkylineExperience() {
         <footer className="fixed inset-x-0 bottom-0 z-30 pointer-events-none px-4 pb-4 pt-12 sm:px-7 sm:pb-6 bg-gradient-to-t from-background/85 via-background/35 to-transparent">
           <div className="max-w-6xl mx-auto flex flex-col gap-3">
             {/* Row 1: Year + Caption + Scroll cue */}
-            <div className="flex items-end justify-between gap-4">
-              <div className="min-w-0">
-                <div className="flex items-baseline gap-3">
+            <div className="flex items-end justify-between gap-3 sm:gap-4">
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-col sm:flex-row sm:items-baseline gap-0.5 sm:gap-3">
                   <span
                     className="skyline-year skyline-text-shadow text-foreground"
                     aria-live="off"
                   >
                     {hud.year}
                   </span>
-                  <span className="skyline-serif skyline-text-shadow text-sm sm:text-[0.98rem] text-foreground/88 truncate">
+                  <span className="skyline-serif skyline-text-shadow text-[0.84rem] sm:text-[0.98rem] leading-snug text-foreground/88 sm:truncate">
                     {(hud.caption || hud.era).replace(/^\d{4}\s*[—–-]\s*/, "")}
                   </span>
                 </div>
@@ -847,7 +1001,7 @@ export function SkylineExperience() {
               {hud.handoverHint && (
                 <button
                   type="button"
-                  onClick={() => handleJumpToTourStop(1)}
+                  onClick={() => handleJumpToTourStop(0)}
                   className="pointer-events-auto inline-flex min-h-10 items-center gap-1.5 rounded-full border border-border-strong bg-secondary/75 px-3.5 text-xs font-medium text-foreground backdrop-blur-md transition-[background-color,transform] duration-150 hover:bg-surface-elevated active:scale-[0.96] motion-reduce:transition-none shrink-0"
                 >
                   <span>Begin night tour</span>
@@ -859,7 +1013,7 @@ export function SkylineExperience() {
             {/* Row 2: Interactive Scrubber OR Tour Chapter Rail */}
             {hud.touring && !spotlight ? (
               <nav
-                aria-label="Nocturnal skyline tour stops"
+                aria-label={`${activeCity.name} nocturnal skyline tour stops`}
                 className="pointer-events-auto flex items-center justify-between gap-2"
               >
                 <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5">
@@ -871,7 +1025,7 @@ export function SkylineExperience() {
                     <ChevronLeft className="size-3.5 text-primary" aria-hidden="true" />
                     <span>Timeline</span>
                   </button>
-                  {TOUR_STOPS.map((stop, idx) => {
+                  {activeCity.tourStops.map((stop, idx) => {
                     const active = hud.activeStopIndex === idx
                     return (
                       <button
@@ -911,10 +1065,13 @@ export function SkylineExperience() {
                     size="icon-sm"
                     variant="outline"
                     aria-label="Next tour stop"
-                    disabled={hud.activeStopIndex >= TOUR_STOPS.length - 1}
+                    disabled={hud.activeStopIndex >= activeCity.tourStops.length - 1}
                     onClick={() =>
                       handleJumpToTourStop(
-                        Math.min(TOUR_STOPS.length - 1, hud.activeStopIndex + 1)
+                        Math.min(
+                          activeCity.tourStops.length - 1,
+                          hud.activeStopIndex + 1
+                        )
                       )
                     }
                     className="rounded-full"
@@ -926,7 +1083,7 @@ export function SkylineExperience() {
             ) : (
               <div className="pointer-events-auto space-y-2">
                 <Slider
-                  aria-label="Manhattan skyline timeline from 1609 to 2026"
+                  aria-label={`${activeCity.name} skyline timeline from ${activeCity.startYear} to ${activeCity.endYear}`}
                   min={0}
                   max={1000}
                   step={1}
@@ -937,9 +1094,11 @@ export function SkylineExperience() {
                   }}
                 />
                 <div className="relative hidden sm:block h-6 text-xs text-foreground/82">
-                  {MILESTONES.map((m, idx) => {
+                  {activeCity.milestones.map((m, idx) => {
                     const targetP =
-                      m.year === 2026 ? 0.78 : progressAtYear(m.year)
+                      m.year >= activeCity.endYear
+                        ? ENGINE_CFG.arrival
+                        : progressAtYearForCity(activeCity, m.year)
                     const isNear = Math.abs(hud.year - m.year) <= 5
                     const isFirst = idx === 0
                     const translateCls = isFirst ? "" : "-translate-x-1/2"
@@ -947,30 +1106,26 @@ export function SkylineExperience() {
                       <button
                         key={m.year}
                         type="button"
-                        title={`${m.label}: ${m.era}`}
                         onClick={() => handleScrubYearProgress(targetP)}
                         style={{ left: `${(targetP * 100).toFixed(2)}%` }}
                         className={cn(
-                          "absolute top-0 inline-flex items-center whitespace-nowrap rounded px-1 py-0.5 tabular-nums skyline-text-shadow transition-colors duration-150 hover:text-foreground",
+                          "absolute top-0 tabular-nums transition-colors duration-150 hover:text-foreground px-1 py-0.5 rounded-sm",
                           translateCls,
-                          isNear && "text-primary font-semibold"
+                          isNear
+                            ? "text-primary font-medium"
+                            : "text-foreground/74"
                         )}
                       >
-                        <span>{m.label}</span>
+                        {m.label}
                       </button>
                     )
                   })}
                   <button
                     type="button"
-                    title="2026 Manhattan at night"
-                    onClick={() => handleScrubYearProgress(1)}
-                    style={{ left: "100%" }}
-                    className={cn(
-                      "absolute top-0 -translate-x-full inline-flex items-center whitespace-nowrap rounded px-1 py-0.5 skyline-text-shadow transition-colors duration-150 hover:text-foreground",
-                      hud.p >= 0.92 && "text-primary font-semibold"
-                    )}
+                    onClick={() => handleJumpToTourStop(0)}
+                    className="absolute top-0 right-0 whitespace-nowrap tabular-nums text-primary/95 hover:text-primary font-medium transition-colors duration-150 px-1 py-0.5 rounded-sm"
                   >
-                    <span>Night</span>
+                    Night Tour
                   </button>
                 </div>
               </div>
@@ -979,8 +1134,9 @@ export function SkylineExperience() {
         </footer>
       )}
 
-      {/* Landmark Atlas Dialog */}
+      {/* Architectural Landmark Atlas Dialog */}
       <LandmarkAtlasDialog
+        city={activeCity}
         open={atlasOpen}
         onOpenChange={setAtlasOpen}
         activeSpotlightId={spotlight?.id ?? null}

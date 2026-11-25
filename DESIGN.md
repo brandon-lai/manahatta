@@ -1,7 +1,7 @@
 ---
-name: Manahatta
-version: 1.0.0
-summary: Four hundred years of the Manhattan skyline, scored to music, followed by a nocturnal architectural tour.
+name: Horizons
+version: 2.0.0
+summary: Five iconic world skylines — New York, Paris, London, Tokyo, and Hong Kong — rising across centuries along their waterfronts, scored to music with nocturnal architectural tours.
 colors:
   background: "oklch(0.145 0.028 264)"
   surface: "oklch(0.185 0.030 264)"
@@ -26,15 +26,15 @@ typography:
     fontWeight: 400
     lineHeight: 1.0
   title:
-    fontFamily: "Caveat, cursive"
-    fontSize: "32px"
-    fontWeight: 500
-    lineHeight: 1.2
+    fontFamily: "Spectral, Georgia, serif"
+    fontSize: "38px"
+    fontWeight: 400
+    lineHeight: 1.12
   body:
     fontFamily: "Spectral, Georgia, serif"
     fontSize: "18px"
     fontWeight: 400
-    lineHeight: 1.62
+    lineHeight: 1.58
   control:
     fontFamily: "Albert Sans, system-ui, sans-serif"
     fontSize: "14px"
@@ -58,47 +58,46 @@ rounded:
   pill: "9999px"
 ---
 
-# Manahatta — Design Direction
+# Horizons — Design Direction
 
 ## Surface Mode
 
-**Experience.** The 1609–2026 Manhattan skyline canvas and its 25-second musical soundtrack lead the viewport from edge to edge. Every interface control recedes into quiet translucent nocturnal chrome anchored at the periphery so the horizon, river reflections, and architecture never compete with heavy UI containers.
+**Experience.** The live architectural canvas fills the viewport edge to edge across five world skylines — **New York, Paris, London, Tokyo, and Hong Kong**. Every interface control (world city switcher, playback controls, timeline scrubber, and Landmark Atlas) recedes into quiet translucent nocturnal chrome anchored at the periphery so horizons, landmarks, mountain/ridge backdrops, and mirrored river reflections command full attention.
 
 ## Scene Sentence
 
-Someone opens an architectural timelapse film at their desk or on their phone in the evening, in a dimly lit room, expecting the city and its soundtrack to fill the whole frame while the timeline, landmark index, and story controls remain calm, crisp, and effortless to reach.
+Someone opens an architectural timelapse atlas at their desk or on their phone in the evening, in a dimly lit room, switching effortlessly between five iconic cities to watch centuries of urban architecture rise, illuminate at dusk, and shimmer across the water.
 
 ## The World
 
-- **Mechanism:** Four centuries of Manhattan rise, shift, demolish, and illuminate along a single East River horizon in sync with a 25-second musical arc, then glide into an interactive nocturnal tour of iconic towers.
-- **Category rut avoided:** Generic black-and-neon cyberpunk dashboards, heavy glassmorphism cards floating over darkened background video, and static portfolio hero templates with tracked-caps eyebrows.
+- **Mechanism:** Each city rises along its historic waterfront across centuries in sync with a 25-second diurnal musical arc, then transitions smoothly into a 5-stop nocturnal architectural tour and an interactive Landmark Atlas.
+- **Category rut avoided:** Generic black-and-neon cyberpunk dashboards, heavy opaque cards floating over darkened background video, and Mapbox vector tile maps.
 - **Concrete references (three material families):**
-  1. **Architectural lithography & Hugh Ferriss charcoal plates** (*The Metropolis of Tomorrow*, 1929) — stepped Art Deco massing, glowing setbacks, atmospheric skyglow, and warm light emerging from deep indigo shadow.
-  2. **Engraved New York monograph typography & brass observatory plaques** — refined editorial serif tabular numerals (`1609`–`2026`), architectural height figures in feet, hairline brass rules, and disciplined left-aligned captions.
-  3. **Nocturnal 35mm cinema titles & East River twilight** — Gordon Willis optical softness, low-corner titles with soft dark drop shadows rather than opaque boxes, shimmering reflected city light on dark water, and deliberate camera pushes.
+  1. **Architectural lithography & Hugh Ferriss charcoal plates** (*The Metropolis of Tomorrow*, 1929) — stepped Art Deco massing, glowing setbacks, atmospheric skyglow, and warm window light emerging from deep indigo shadow.
+  2. **Engraved architectural monograph plates & brass observatory plaques** — refined editorial serif tabular numerals, elevation heights in feet and meters, hairline rules, and calm left-aligned architectural captions.
+  3. **Nocturnal 35mm cinema titles & waterfront twilight** — open-sky typography with soft feathered dark scrims rather than boxed cards, mirrored city light rippling across dark water, and deliberate camera glides.
 
 ## Colour Posture & Tokens
 
 **Drenched nocturnal canvas, restrained tungsten accent.**
-- Ground: deep midnight Hudson indigo (`oklch(0.145 0.028 264)`), never pure `#000`.
+- Ground: deep midnight indigo (`oklch(0.145 0.028 264)`), never pure `#000`.
 - Ink: warm parchment window-light cream (`oklch(0.945 0.020 82)`), never pure `#fff`.
-- Accent (`primary`): warm tungsten window-light amber (`oklch(0.805 0.132 76)`), reserved for the primary Enter call to action, active timeline indicator, focus ring, and lit Empire State greeting highlight.
+- Accent (`primary`): warm tungsten window-light amber (`oklch(0.805 0.132 76)`), reserved for active city selection, primary Enter CTA, active timeline ticks, focus rings, and illuminated monument highlights.
 - Dark theme is the native atmosphere; dark tokens are also defined on `[data-theme="dark"]` for theme-attribute compliance.
 
 ## Typography
 
-Two core families plus one dedicated handwritten outlier:
-- **Display & Editorial Serif (`Spectral`)** — tabular-numeral year counter (fluid `clamp(1.75rem, 3.2vw, 2.75rem)`, max `44px` recorded in front matter), opening title (fluid `clamp(2.25rem, 5vw, 3.5rem)`, max `56px`), and open-sky architectural story text.
-- **Interface Sans (`Albert Sans`)** — translucent controls, interactive timeline markers, and the Landmark Atlas dialog.
-- **Handwritten Outlier (`Caveat`)** — reserved strictly for the personal `"Hi, I'm Brandon"` window annotation and tour chapter headings, preserving the warmth of the original hand-drawn signature across all platforms.
+Two cohesive architectural faces:
+- **Display & Editorial Serif (`Spectral`)** — tabular-numeral year counter (fluid `clamp(1.85rem, 3.3vw, 2.75rem)`, max `44px`), opening city title (fluid `clamp(2.15rem, 4.8vw, 3.5rem)`, max `56px`), and open-sky nocturnal tour prose.
+- **Interface Sans (`Albert Sans`)** — translucent top HUD city switcher, playback controls, timeline markers, and the Landmark Atlas dialog.
 
 ## The Signature
 
-The continuous single-take diurnal timelapse from Lenape woods in 1609 through Art Deco daylight to 2026 Manhattan night — with true East River mirrored light reflections, illuminated Art Deco crowns (Chrysler sunburst, Empire State tiers, Brooklyn Bridge cable necklace), and the camera push into a single glowing Empire State window with a hand-scribbled arrow and greeting, seamlessly transitioning into an interactive 5-stop skyline tour and fly-to Landmark Atlas.
+Seamless instant switching between five handcrafted historical world skylines on a single 2.5D diurnal engine — from New York's Art Deco crowns and Brooklyn Bridge, to Paris's Haussmannian mansards and sparkling Eiffel lighthouse beam, London's rotating London Eye, Tower Bridge, and Shard, Tokyo's Skytree and Tokyo Tower beneath snow-capped Mount Fuji, and Hong Kong's Bank of China X-trusses rising against a light-speckled Victoria Peak — all mirrored live in rippling waterfront reflections.
 
 ## Mirror Test
 
-A neighbouring personal-site or interactive-map PRD would default to a standard light landing page with a card grid or a Mapbox dark vector tile map with purple accents. Changing the ground to indigo-tinted lithography charcoal, pairing `Spectral` + `Albert Sans` + `Caveat`, painting 2.5D architectural lighting with mirrored water reflections on a 417-year musical timeline, and keeping story copy floating cleanly in open sky without opaque boxes makes this unmistakably Manahatta.
+A neighbouring architectural or travel showcase would default to a card grid of stock city photographs or a generic dark vector map. Painting custom architectural silhouettes, city-specific geographical backdrops (Mount Fuji, Victoria Peak, Montmartre, Palisades), custom bridge engineering (Tower Bridge, Brooklyn Bridge, Stonecutters cable-stays, Seine stone arches), and mirrored waterfront reflections on a single musical timeline makes Horizons unmistakable.
 
 ## Motion & Accessibility Notes
 

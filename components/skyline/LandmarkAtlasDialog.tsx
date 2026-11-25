@@ -12,92 +12,112 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import {
-  BRIDGES,
   type BridgeDef,
-  HEROES,
+  type CityConfig,
+  type EraFilter,
   type HeroLandmark,
-  type LandmarkEra,
-  progressAtYear,
+  progressAtYearForCity,
 } from "@/lib/skyline/data"
 import { type SpotlightTarget } from "@/lib/skyline/renderer"
 import { cn } from "@/lib/utils"
 
-type AtlasFilter = "all" | LandmarkEra | "bridges"
-
-const FILTERS: { id: AtlasFilter; label: string }[] = [
-  { id: "all", label: "All" },
-  { id: "historic", label: "Historic" },
-  { id: "art-deco", label: "Art Deco" },
-  { id: "modern", label: "Modern" },
-  { id: "lost", label: "Lost Icons" },
-  { id: "bridges", label: "Bridges" },
-]
+type AtlasFilter = "all" | EraFilter | "bridges"
 
 interface LandmarkAtlasDialogProps {
+  city: CityConfig
   open: boolean
   onOpenChange: (open: boolean) => void
   activeSpotlightId: string | null
   onFlyTo: (target: SpotlightTarget) => void
 }
 
-function buildHeroTarget(h: HeroLandmark): SpotlightTarget {
-  // Fly into each landmark's defining architectural era so historic icons stand prominent
+function buildHeroTarget(city: CityConfig, h: HeroLandmark): SpotlightTarget {
+  // Fly into each landmark's defining era so historic icons stand clear and prominent
   let year: number
   if (h.demo) {
-    year = Math.min(h.demo - 3, Math.max(h.built + 10, 1936))
+    year = Math.min(h.demo - 3, Math.max(h.built + 10, city.startYear + 40))
   } else if (h.era === "historic") {
-    year = Math.min(1918, Math.max(h.built + 8, 1855))
-  } else if (h.era === "art-deco") {
-    year = Math.min(1942, Math.max(h.built + 4, 1934))
+    year = Math.min(1918, Math.max(h.built + 12, city.startYear + 60))
+  } else if (h.era === "classic") {
+    year = Math.min(1986, Math.max(h.built + 6, 1936))
   } else {
-    year = 2026
+    year = city.endYear
   }
 
-  const p = year >= 2026 ? 0.94 : progressAtYear(year)
-  // Give supertalls generous framing span so crowns & antennas stay well below the top edge
-  const span = h.h > 1300 ? 0.25 : h.h > 900 ? 0.21 : h.h > 450 ? 0.175 : 0.15
+  const p =
+    year >= city.endYear ? 0.94 : progressAtYearForCity(city, year)
+  const span =
+    h.h > 1400 ? 0.25 : h.h > 950 ? 0.21 : h.h > 450 ? 0.18 : 0.16
   return {
     id: h.id,
     x: h.x,
     span,
-    ft: Math.max(180, h.h * 0.52),
+    ft: Math.max(160, h.h * 0.52),
     year,
     p,
   }
 }
 
-function buildBridgeTarget(b: BridgeDef): SpotlightTarget {
+function buildBridgeTarget(city: CityConfig, b: BridgeDef): SpotlightTarget {
   return {
     id: b.id,
     x: b.x,
     span: 0.21,
-    ft: b.towerH * 0.62,
-    year: 2026,
+    ft: Math.max(120, b.towerH * 0.62),
+    year: city.endYear,
     p: 0.94,
   }
 }
 
 export function LandmarkAtlasDialog({
+  city,
   open,
   onOpenChange,
   activeSpotlightId,
   onFlyTo,
 }: LandmarkAtlasDialogProps) {
-  const [filter, setFilter] = React.useState<AtlasFilter>("all")
+  const [filterState, setFilterState] = React.useState<{
+    cityId: string
+    value: AtlasFilter
+  }>({ cityId: city.id, value: "all" })
+  const filter: AtlasFilter =
+    filterState.cityId === city.id ? filterState.value : "all"
+  const setFilter = React.useCallback(
+    (value: AtlasFilter) => {
+      setFilterState({ cityId: city.id, value })
+    },
+    [city.id]
+  )
+
+  const filters = React.useMemo(() => {
+    const out: { id: AtlasFilter; label: string }[] = [
+      { id: "all", label: "All" },
+      { id: "historic", label: city.eraFilterLabels.historic },
+      { id: "classic", label: city.eraFilterLabels.classic },
+      { id: "modern", label: city.eraFilterLabels.modern },
+    ]
+    if (city.eraFilterLabels.lost && city.heroes.some((h) => h.era === "lost")) {
+      out.push({ id: "lost", label: city.eraFilterLabels.lost })
+    }
+    if (city.bridges.length > 0) {
+      out.push({ id: "bridges", label: "Bridges" })
+    }
+    return out
+  }, [city])
 
   const filteredHeroes = React.useMemo(() => {
     if (filter === "bridges") return []
     const list =
       filter === "all"
-        ? [...HEROES]
-        : HEROES.filter((h) => h.era === filter)
+        ? [...city.heroes]
+        : city.heroes.filter((h) => h.era === filter)
     return list.sort((a, b) => a.built - b.built)
-  }, [filter])
+  }, [city.heroes, filter])
 
   const filteredBridges = React.useMemo(() => {
     if (filter !== "all" && filter !== "bridges") return []
-    return [...BRIDGES].sort((a, b) => a.built - b.built)
-  }, [filter])
+    return [...city.bridges].sort((a, b) => a.built - b.built)
+  }, [city.bridges, filter])
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -107,15 +127,16 @@ export function LandmarkAtlasDialog({
             <div className="flex items-center gap-2 text-primary">
               <Compass className="size-4" aria-hidden="true" />
               <span className="text-xs font-medium text-muted-foreground">
-                Manhattan East River Elevation, 1609 to 2026
+                {city.name}, {city.waterbody} Elevation ({city.startYear} to{" "}
+                {city.endYear})
               </span>
             </div>
             <DialogTitle className="skyline-serif text-2xl font-normal tracking-tight text-foreground mt-1">
-              Skyline Atlas
+              {city.name} Landmark Atlas
             </DialogTitle>
             <DialogDescription className="text-muted-foreground">
-              Select any tower or East River span to glide the camera into its
-              era.
+              Select any tower, monument, or crossing to glide the camera into
+              its era.
             </DialogDescription>
           </DialogHeader>
 
@@ -124,7 +145,7 @@ export function LandmarkAtlasDialog({
             role="group"
             aria-label="Filter landmarks by era"
           >
-            {FILTERS.map((f) => {
+            {filters.map((f) => {
               const selected = filter === f.id
               return (
                 <button
@@ -186,7 +207,7 @@ export function LandmarkAtlasDialog({
                     variant={isCurrent ? "default" : "outline"}
                     className="shrink-0 self-start sm:self-center"
                     onClick={() => {
-                      onFlyTo(buildHeroTarget(h))
+                      onFlyTo(buildHeroTarget(city, h))
                       onOpenChange(false)
                     }}
                   >
@@ -202,7 +223,7 @@ export function LandmarkAtlasDialog({
                 {filter === "all" && (
                   <div className="flex items-center gap-2 pt-1 pb-2.5 text-xs font-medium text-foreground/82">
                     <Building2 className="size-3.5 text-primary" aria-hidden="true" />
-                    <span>East River Crossings</span>
+                    <span>{city.waterbody} Crossings</span>
                   </div>
                 )}
                 {filteredBridges.map((b) => {
@@ -226,7 +247,7 @@ export function LandmarkAtlasDialog({
                             {b.built}
                           </span>
                           <span className="text-xs tabular-nums text-foreground/78">
-                            {b.towerH} ft towers
+                            {b.towerH} ft span
                           </span>
                         </div>
                         <p className="text-xs text-foreground/82 leading-relaxed">
@@ -240,7 +261,7 @@ export function LandmarkAtlasDialog({
                         variant={isCurrent ? "default" : "outline"}
                         className="shrink-0 self-start sm:self-center"
                         onClick={() => {
-                          onFlyTo(buildBridgeTarget(b))
+                          onFlyTo(buildBridgeTarget(city, b))
                           onOpenChange(false)
                         }}
                       >

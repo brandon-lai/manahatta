@@ -1,5 +1,5 @@
 import type { Metadata, Viewport } from "next"
-import { Albert_Sans, Caveat, Spectral } from "next/font/google"
+import { Albert_Sans, Spectral } from "next/font/google"
 
 import "./globals.css"
 import { ThemeProvider } from "@/components/theme-provider"
@@ -21,31 +21,24 @@ const spectral = Spectral({
   display: "swap",
 })
 
-const caveat = Caveat({
-  subsets: ["latin"],
-  weight: ["500", "600"],
-  variable: "--font-hand",
-  display: "swap",
-})
-
 export const metadata: Metadata = {
   metadataBase: new URL(
     process.env.NEXT_PUBLIC_SITE_URL ?? "https://manahatta.vercel.app"
   ),
-  title: "Manahatta: Manhattan Skyline, 1609 to 2026",
+  title: "Horizons: Five World Skylines Through Time",
   description:
-    "Four centuries of the Manhattan skyline rising along the East River in sync with music, followed by a nocturnal architectural tour.",
+    "Watch New York, Paris, London, Tokyo, and Hong Kong rise along their rivers and harbors across centuries, scored to music with nocturnal architectural tours.",
   openGraph: {
-    title: "Manahatta: Manhattan Skyline, 1609 to 2026",
+    title: "Horizons: Five World Skylines Through Time",
     description:
-      "Four centuries of the Manhattan skyline rising along the East River in sync with music, followed by a nocturnal architectural tour.",
+      "Watch New York, Paris, London, Tokyo, and Hong Kong rise along their rivers and harbors across centuries, scored to music with nocturnal architectural tours.",
     type: "website",
   },
   twitter: {
     card: "summary_large_image",
-    title: "Manahatta: Manhattan Skyline, 1609 to 2026",
+    title: "Horizons: Five World Skylines Through Time",
     description:
-      "Four centuries of the Manhattan skyline rising along the East River in sync with music.",
+      "Five iconic world skylines rising across centuries along their waterfronts.",
   },
 }
 
@@ -67,8 +60,7 @@ export default function RootLayout({
       className={cn(
         "antialiased",
         albertSans.variable,
-        spectral.variable,
-        caveat.variable
+        spectral.variable
       )}
     >
       <body>

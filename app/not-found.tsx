@@ -10,14 +10,15 @@ export default function NotFound() {
         </div>
         <div className="space-y-2">
           <p className="text-xs font-medium text-primary tabular-nums">
-            404 · Off the 1811 Grid
+            404 · Off the Map
           </p>
           <h1 className="skyline-serif text-3xl font-normal text-foreground">
-            Past the river wall
+            Beyond the shoreline
           </h1>
           <p className="text-sm leading-relaxed text-muted-foreground">
-            That cross-street doesn&apos;t exist on the island. Head back to the
-            East River horizon to watch Manhattan rise from 1609 to 2026.
+            That elevation doesn&apos;t exist in the atlas. Return to Horizons
+            to watch New York, Paris, London, Tokyo, and Hong Kong rise across
+            centuries.
           </p>
         </div>
         <div className="pt-2">
@@ -26,7 +27,7 @@ export default function NotFound() {
             className="inline-flex min-h-11 items-center gap-2 rounded-full border border-border-strong bg-primary px-6 py-2.5 text-sm font-medium text-primary-foreground transition-[background-color,transform] duration-150 ease-[var(--ease-out)] hover:bg-primary/90 active:scale-[0.96] motion-reduce:transition-none"
           >
             <ArrowLeft className="size-4" aria-hidden="true" />
-            <span>Return to Manahatta</span>
+            <span>Return to Horizons</span>
           </Link>
         </div>
       </div>

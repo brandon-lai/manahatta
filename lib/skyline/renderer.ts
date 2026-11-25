@@ -1,24 +1,19 @@
 import {
   type AnyBuilding,
-  BRIDGES,
-  buildFill,
-  CFG,
-  EVENTS,
-  eraLabelForYear,
-  frameAt,
-  GREETING,
-  HEROES,
+  buildFillForCity,
+  type CityConfig,
+  createFrameSampler,
+  ENGINE_CFG,
+  eraLabelForCity,
   type HeroLandmark,
   type Palette,
   paletteAt,
   profileOf,
-  sampleTour,
-  TOUR_STOPS,
-  yearAt,
+  sampleTourForCity,
+  yearAtForCity,
 } from "./data"
 import {
   clamp,
-  glide,
   hash,
   lerp,
   mixRgb,
@@ -38,7 +33,6 @@ export interface HudSnapshot {
   touring: boolean
   activeStopIndex: number
   stopOpacities: number[]
-  greetAlpha: number
   spotlightId: string | null
   handoverHint: boolean
 }
@@ -53,6 +47,7 @@ export interface SpotlightTarget {
 }
 
 export interface SkylineController {
+  setCity: (city: CityConfig) => void
   setProgress: (p: number, q: number, immediate?: boolean) => void
   setSpotlight: (target: SpotlightTarget | null) => void
   setAudioEnergy: (energy: number) => void
@@ -86,6 +81,13 @@ interface Tree {
   s: number
 }
 
+interface PeakLight {
+  x: number
+  yFrac: number
+  a: number
+  warm: boolean
+}
+
 interface Camera {
   cx: number
   span: number
@@ -94,35 +96,37 @@ interface Camera {
   ppft: number
 }
 
-const ALL_CAPTIONS: { year: number; text: string }[] = (() => {
+function buildCaptionsForCity(city: CityConfig): { year: number; text: string }[] {
   const out: { year: number; text: string }[] = []
-  for (const h of HEROES) {
+  for (const h of city.heroes) {
     if (h.cap) out.push({ year: h.built, text: h.cap })
     if (h.bye && h.demo) out.push({ year: h.demo, text: h.bye })
   }
-  for (const e of EVENTS) {
+  for (const e of city.events) {
     out.push({ year: e.year, text: e.text })
   }
   out.sort((a, b) => a.year - b.year)
   return out
-})()
+}
 
 export function initSkylineRenderer(
   canvas: HTMLCanvasElement,
+  initialCity: CityConfig,
   onHudUpdate: (snapshot: HudSnapshot) => void
 ): SkylineController {
   const ctx = canvas.getContext("2d", { alpha: false })
   if (!ctx) {
     return {
+      setCity: () => {},
       setProgress: () => {},
       setSpotlight: () => {},
       setAudioEnergy: () => {},
-      getState: () => ({ p: 0, q: 0, year: 1609 }),
+      getState: () => ({ p: 0, q: 0, year: initialCity.startYear }),
       destroy: () => {},
     }
   }
 
-  // Offscreen reflection canvas for shimmering mirrored East River water
+  // Offscreen reflection canvas for shimmering mirrored river/harbor water
   const reflCanvas = document.createElement("canvas")
   const reflCtx = reflCanvas.getContext("2d")
 
@@ -138,9 +142,12 @@ export function initSkylineRenderer(
   let baselineY = 0
   let hz = 0
 
-  const FILL = buildFill(
-    typeof window !== "undefined" && window.innerWidth < 768 ? 360 : 700
-  )
+  let activeCity = initialCity
+  let frameAt = createFrameSampler(activeCity)
+  let allCaptions = buildCaptionsForCity(activeCity)
+  const fillCount =
+    typeof window !== "undefined" && window.innerWidth < 768 ? 360 : 680
+  let fillBuildings = buildFillForCity(activeCity, fillCount)
 
   // Deterministic celestial & landscape props
   const STARS: Star[] = (() => {
@@ -184,6 +191,16 @@ export function initSkylineRenderer(
     }))
   })()
 
+  const PEAK_LIGHTS: PeakLight[] = (() => {
+    const r = prng(85201)
+    return Array.from({ length: 95 }, () => ({
+      x: 0.12 + r() * 0.78,
+      yFrac: 0.14 + r() * 0.68,
+      a: 0.32 + r() * 0.58,
+      warm: r() > 0.22,
+    }))
+  })()
+
   const cam: Camera = { cx: 0.06, span: 0.16, cyFt: 0, ppwx: 1, ppft: 1 }
 
   function setCamera(cx: number, span: number, cyFt: number) {
@@ -191,7 +208,7 @@ export function initSkylineRenderer(
     cam.span = span
     cam.cyFt = cyFt
     cam.ppwx = W / span
-    cam.ppft = (cam.ppwx * EXAG) / CFG.islandFt
+    cam.ppft = (cam.ppwx * EXAG) / activeCity.islandFt
   }
 
   function sx(wx: number): number {
@@ -204,9 +221,9 @@ export function initSkylineRenderer(
 
   function framingForStop(stop: { x: number; span: number; ft: number }) {
     const span = isMobile ? Math.min(stop.span, 0.28) : stop.span
-    const baseCy = (baselineY - H / 2) / (((W / span) * EXAG) / CFG.islandFt)
-    const focusCy =
-      stop.ft - (H * (isMobile ? 0.03 : 0.06)) / (((W / span) * EXAG) / CFG.islandFt)
+    const ppft = ((W / span) * EXAG) / activeCity.islandFt
+    const baseCy = (baselineY - H / 2) / ppft
+    const focusCy = stop.ft - (H * (isMobile ? 0.03 : 0.06)) / ppft
     const zoom = 1 - smoothstep(0.32, 0.62, span)
     return {
       cx: stop.x,
@@ -241,7 +258,6 @@ export function initSkylineRenderer(
   let currentQ = 0
   let audioEnergy = 0
   let smoothEnergy = 0
-  let arrowDim = 0
   let spotlight: SpotlightTarget | null = null
   let spotBlend = 0
   let lastSpot: SpotlightTarget | null = null
@@ -263,36 +279,46 @@ export function initSkylineRenderer(
     ctx!.fillStyle = g
     ctx!.fillRect(0, 0, W, hz + 2)
 
-    // Warm urban light-pollution domes over Midtown & Downtown at night
+    // Warm/tinted urban light-pollution domes over the city's main districts at night
     if (nightness > 0.05) {
       const pulse = 1 + smoothEnergy * 0.24
-      const domes = [
-        { wx: 0.36, rFactor: 0.44, strength: 0.22 },
-        { wx: 0.048, rFactor: 0.3, strength: 0.17 },
-      ]
-      for (const d of domes) {
+      for (const d of activeCity.skyglowDomes) {
         const dx = sx(d.wx)
         const rad = Math.max(W * d.rFactor, 260)
+        const col = d.tint ?? pal.glow
         const dg = ctx!.createRadialGradient(dx, hz, 0, dx, hz, rad)
-        dg.addColorStop(0, rgbCss(pal.glow, nightness * d.strength * pulse))
-        dg.addColorStop(0.48, rgbCss(pal.glow, nightness * d.strength * 0.35 * pulse))
-        dg.addColorStop(1, rgbCss(pal.glow, 0))
+        dg.addColorStop(0, rgbCss(col, nightness * d.strength * pulse))
+        dg.addColorStop(0.48, rgbCss(col, nightness * d.strength * 0.35 * pulse))
+        dg.addColorStop(1, rgbCss(col, 0))
         ctx!.fillStyle = dg
         ctx!.fillRect(0, 0, W, hz + 2)
       }
     }
 
-    // Subtle Fire of 1776 amber haze near the Battery
-    const year = yearAt(p)
-    const fireGlow =
-      smoothstep(1772, 1776, year) * (1 - smoothstep(1777, 1783, year))
-    if (fireGlow > 0.01) {
-      const fx = sx(0.036)
-      const fg = ctx!.createRadialGradient(fx, hz, 0, fx, hz, W * 0.22)
-      fg.addColorStop(0, `rgba(255,112,48,${fireGlow * 0.36})`)
-      fg.addColorStop(1, "rgba(255,112,48,0)")
-      ctx!.fillStyle = fg
-      ctx!.fillRect(0, 0, W, hz + 2)
+    // Historical fire haze for NYC (1776) and London (1666)
+    const year = yearAtForCity(activeCity, p)
+    if (activeCity.id === "nyc") {
+      const fireGlow =
+        smoothstep(1772, 1776, year) * (1 - smoothstep(1777, 1783, year))
+      if (fireGlow > 0.01) {
+        const fx = sx(0.036)
+        const fg = ctx!.createRadialGradient(fx, hz, 0, fx, hz, W * 0.22)
+        fg.addColorStop(0, `rgba(255,112,48,${fireGlow * 0.36})`)
+        fg.addColorStop(1, "rgba(255,112,48,0)")
+        ctx!.fillStyle = fg
+        ctx!.fillRect(0, 0, W, hz + 2)
+      }
+    } else if (activeCity.id === "london") {
+      const fireGlow =
+        smoothstep(1660, 1666, year) * (1 - smoothstep(1668, 1678, year))
+      if (fireGlow > 0.01) {
+        const fx = sx(0.44)
+        const fg = ctx!.createRadialGradient(fx, hz, 0, fx, hz, W * 0.26)
+        fg.addColorStop(0, `rgba(255,116,44,${fireGlow * 0.4})`)
+        fg.addColorStop(1, "rgba(255,116,44,0)")
+        ctx!.fillStyle = fg
+        ctx!.fillRect(0, 0, W, hz + 2)
+      }
     }
 
     // Twinkling stars at pre-dawn and night
@@ -451,9 +477,15 @@ export function initSkylineRenderer(
   }
 
   // ---------------------------------------------------------------------------
-  // Land, Forests, Central Park & East River Piers
+  // City-Specific Far Backdrops (Palisades, Montmartre, Thames, Mount Fuji, Victoria Peak)
   // ---------------------------------------------------------------------------
   function hillFt(wx: number, year: number): number {
+    if (activeCity.id !== "nyc") {
+      // Gentle historic waterfront grading for European & Asian river/harbor cities
+      const flat = smoothstep(activeCity.startYear, activeCity.startYear + 180, year)
+      const wild = 12 + Math.sin(wx * 26 + 0.8) * 7 + Math.sin(wx * 58) * 4
+      return lerp(wild, 4, flat)
+    }
     const flat = smoothstep(1811, 1895, year)
     const wild =
       26 +
@@ -465,8 +497,156 @@ export function initSkylineRenderer(
     return lerp(wild, urban, flat)
   }
 
-  function drawFarRidge(pal: Palette) {
+  function drawFarBackdrop(pal: Palette, nightness: number) {
     ctx!.save()
+    const kind = activeCity.backdrop
+
+    if (kind === "fuji") {
+      // Majestic distant Mount Fuji cone rising on the western Tokyo horizon
+      const peakX = W * 0.22
+      const peakH = Math.min(hz * 0.48, H * 0.32)
+      const baseW = Math.max(W * 0.42, 420)
+      const peakY = hz - peakH
+      const fujiCol = mixRgb(pal.hor, pal.mid, 0.44 + nightness * 0.22)
+
+      // Distant soft Tanzawa foothills
+      ctx!.globalAlpha = 0.26
+      ctx!.fillStyle = rgbCss(mixRgb(pal.hor, pal.bd, 0.36))
+      ctx!.beginPath()
+      ctx!.moveTo(0, hz)
+      for (let i = 0; i <= 48; i++) {
+        const x = (i / 48) * W
+        const y = hz - (18 + Math.sin(i * 0.45) * 10 + Math.cos(i * 1.1) * 6)
+        ctx!.lineTo(x, y)
+      }
+      ctx!.lineTo(W, hz)
+      ctx!.closePath()
+      ctx!.fill()
+
+      // Concave volcanic cone of Mount Fuji
+      ctx!.globalAlpha = 0.52 - nightness * 0.08
+      ctx!.fillStyle = rgbCss(fujiCol)
+      ctx!.beginPath()
+      ctx!.moveTo(peakX - baseW * 0.54, hz)
+      ctx!.quadraticCurveTo(
+        peakX - baseW * 0.16,
+        hz - peakH * 0.36,
+        peakX - baseW * 0.036,
+        peakY
+      )
+      ctx!.lineTo(peakX + baseW * 0.036, peakY)
+      ctx!.quadraticCurveTo(
+        peakX + baseW * 0.16,
+        hz - peakH * 0.36,
+        peakX + baseW * 0.54,
+        hz
+      )
+      ctx!.closePath()
+      ctx!.fill()
+
+      // Luminous snow-capped summit (visible in daylight & twilight glow)
+      const snowAlpha = clamp(0.68 - nightness * 0.48, 0.14, 0.68)
+      const snowCol = mixRgb([248, 250, 255], pal.hor, 0.28)
+      ctx!.globalAlpha = snowAlpha
+      ctx!.fillStyle = rgbCss(snowCol)
+      ctx!.beginPath()
+      ctx!.moveTo(peakX - baseW * 0.036, peakY)
+      ctx!.lineTo(peakX + baseW * 0.036, peakY)
+      ctx!.lineTo(peakX + baseW * 0.125, peakY + peakH * 0.29)
+      ctx!.lineTo(peakX + baseW * 0.06, peakY + peakH * 0.23)
+      ctx!.lineTo(peakX + baseW * 0.015, peakY + peakH * 0.32)
+      ctx!.lineTo(peakX - baseW * 0.045, peakY + peakH * 0.24)
+      ctx!.lineTo(peakX - baseW * 0.125, peakY + peakH * 0.29)
+      ctx!.closePath()
+      ctx!.fill()
+
+      ctx!.restore()
+      return
+    }
+
+    if (kind === "victoria-peak") {
+      // Dramatic granite spine of Victoria Peak & Jardine's Lookout rising straight behind Hong Kong Island
+      const ridgeCol = mixRgb(pal.bd, pal.hor, 0.22)
+      const ridgeTopAt = (u: number): number => {
+        // Peak highest behind Central/Admiralty (~0.32..0.52)
+        const mainPeak = Math.exp(-Math.pow((u - 0.36) / 0.22, 2)) * 0.42
+        const eastPeak = Math.exp(-Math.pow((u - 0.68) / 0.24, 2)) * 0.31
+        const undulation = Math.sin(u * 14) * 0.025 + Math.cos(u * 27) * 0.012
+        return hz - H * clamp(0.08 + mainPeak + eastPeak + undulation, 0.06, 0.52)
+      }
+
+      ctx!.globalAlpha = 0.72
+      const rg = ctx!.createLinearGradient(0, hz - H * 0.48, 0, hz)
+      rg.addColorStop(0, rgbCss(mixRgb(ridgeCol, pal.mid, 0.28)))
+      rg.addColorStop(1, rgbCss(ridgeCol))
+      ctx!.fillStyle = rg
+      ctx!.beginPath()
+      ctx!.moveTo(0, hz)
+      for (let i = 0; i <= 64; i++) {
+        const u = i / 64
+        ctx!.lineTo(u * W, ridgeTopAt(u))
+      }
+      ctx!.lineTo(W, hz)
+      ctx!.closePath()
+      ctx!.fill()
+
+      // Twinkling Mid-Levels & Peak Tower lights scattered up the mountainside at night
+      if (nightness > 0.2) {
+        for (const pl of PEAK_LIGHTS) {
+          const px = pl.x * W
+          const top = ridgeTopAt(pl.x)
+          const py = lerp(top + 14, hz - 8, pl.yFrac)
+          if (py <= top + 8) continue
+          ctx!.globalAlpha = nightness * pl.a * 0.75
+          ctx!.fillStyle = pl.warm ? "rgb(255,226,166)" : "rgb(218,236,255)"
+          ctx!.beginPath()
+          ctx!.arc(px, py, 1.05, 0, Math.PI * 2)
+          ctx!.fill()
+        }
+      }
+
+      ctx!.restore()
+      return
+    }
+
+    if (kind === "montmartre") {
+      // Soft northern Paris hillside silhouette (Butte Montmartre)
+      ctx!.globalAlpha = 0.28
+      ctx!.fillStyle = rgbCss(mixRgb(pal.hor, pal.bd, 0.34))
+      ctx!.beginPath()
+      ctx!.moveTo(0, hz)
+      for (let i = 0; i <= 48; i++) {
+        const u = i / 48
+        const butte = Math.exp(-Math.pow((u - 0.58) / 0.18, 2)) * 52
+        const roll = 18 + Math.sin(u * 12) * 8
+        ctx!.lineTo(u * W, hz - (roll + butte) * (H / 900))
+      }
+      ctx!.lineTo(W, hz)
+      ctx!.closePath()
+      ctx!.fill()
+      ctx!.restore()
+      return
+    }
+
+    if (kind === "thames") {
+      // Subtle misty Thames valley horizon
+      ctx!.globalAlpha = 0.22
+      ctx!.fillStyle = rgbCss(mixRgb(pal.hor, pal.bd, 0.3))
+      ctx!.beginPath()
+      ctx!.moveTo(0, hz)
+      for (let i = 0; i <= 48; i++) {
+        const u = i / 48
+        const y = hz - (14 + Math.sin(u * 15) * 6 + Math.cos(u * 29) * 3)
+        ctx!.lineTo(u * W, y)
+      }
+      ctx!.lineTo(W, hz)
+      ctx!.closePath()
+      ctx!.fill()
+      ctx!.restore()
+      return
+    }
+
+    // Default: NYC Palisades ridge across the Hudson
     ctx!.globalAlpha = 0.34
     ctx!.fillStyle = rgbCss(mixRgb(pal.hor, pal.bd, 0.34))
     ctx!.beginPath()
@@ -484,11 +664,18 @@ export function initSkylineRenderer(
   }
 
   function drawLand(year: number, pal: Palette) {
-    const landCol = mixRgb(pal.bd, [36, 54, 42], 1 - smoothstep(1780, 1890, year))
+    const greenMix =
+      1 -
+      smoothstep(
+        activeCity.startYear + 120,
+        activeCity.startYear + 260,
+        year
+      )
+    const landCol = mixRgb(pal.bd, [36, 54, 42], activeCity.hasForests ? greenMix : 0.12)
     ctx!.fillStyle = rgbCss(landCol)
     ctx!.beginPath()
-    const startX = Math.max(-0.02, cam.cx - cam.span * 0.6)
-    const endX = Math.min(1.04, cam.cx + cam.span * 0.6)
+    const startX = Math.max(-0.04, cam.cx - cam.span * 0.62)
+    const endX = Math.min(1.06, cam.cx + cam.span * 0.62)
     ctx!.moveTo(sx(startX), hz + 2)
     for (let i = 0; i <= 64; i++) {
       const wx = lerp(startX, endX, i / 64)
@@ -498,65 +685,69 @@ export function initSkylineRenderer(
     ctx!.closePath()
     ctx!.fill()
 
-    // Lenape & early-colonial forest clearing
-    const forestCol = mixRgb(pal.bd, [26, 48, 36], 0.58)
-    ctx!.fillStyle = rgbCss(forestCol)
-    for (const tr of TREES) {
-      const clearYr = 1645 + tr.x * 365 + tr.s * 30
-      const alive = 1 - smoothstep(clearYr - 14, clearYr + 24, year)
-      if (alive <= 0.02) continue
-      const tx = sx(tr.x)
-      if (tx < -20 || tx > W + 20) continue
-      const baseY = sy(hillFt(tr.x, year)) + 1
-      const th = tr.h * cam.ppft * alive
-      const tw = Math.max(1.5, tr.w * cam.ppwx)
-      ctx!.beginPath()
-      ctx!.moveTo(tx - tw, baseY)
-      ctx!.lineTo(tx, baseY - th)
-      ctx!.lineTo(tx + tw, baseY)
-      ctx!.closePath()
-      ctx!.fill()
-    }
-
-    // Central Park foliage canopy (1858 onward)
-    const park = smoothstep(1858, 1874, year)
-    if (park > 0.01) {
-      const p0 = sx(0.45)
-      const p1 = sx(0.65)
-      if (p1 > 0 && p0 < W) {
-        ctx!.save()
-        ctx!.globalAlpha = park * 0.65
-        ctx!.fillStyle = rgbCss(mixRgb(pal.bd, [32, 62, 44], 0.56))
+    // Early forest clearing (NYC, Tokyo, Hong Kong)
+    if (activeCity.hasForests) {
+      const forestCol = mixRgb(pal.bd, [26, 48, 36], 0.58)
+      ctx!.fillStyle = rgbCss(forestCol)
+      const baseClear = activeCity.forestClearStart ?? activeCity.startYear + 40
+      for (const tr of TREES) {
+        const clearYr = baseClear + tr.x * 260 + tr.s * 30
+        const alive = 1 - smoothstep(clearYr - 14, clearYr + 24, year)
+        if (alive <= 0.02) continue
+        const tx = sx(tr.x)
+        if (tx < -20 || tx > W + 20) continue
+        const baseY = sy(hillFt(tr.x, year)) + 1
+        const th = tr.h * cam.ppft * alive
+        const tw = Math.max(1.5, tr.w * cam.ppwx)
         ctx!.beginPath()
-        ctx!.moveTo(p0, hz)
-        for (let i = 0; i <= 32; i++) {
-          const x = lerp(p0, p1, i / 32)
-          const h = (18 + Math.sin(i * 1.9) * 8 + Math.cos(i * 3.1) * 5) * park
-          ctx!.lineTo(x, sy(h))
-        }
-        ctx!.lineTo(p1, hz)
+        ctx!.moveTo(tx - tw, baseY)
+        ctx!.lineTo(tx, baseY - th)
+        ctx!.lineTo(tx + tw, baseY)
         ctx!.closePath()
         ctx!.fill()
-        ctx!.restore()
       }
     }
 
-    // East River finger piers
-    const piers =
-      smoothstep(1820, 1880, year) * (1 - smoothstep(1965, 2005, year) * 0.72)
-    if (piers > 0.01) {
-      ctx!.save()
-      ctx!.fillStyle = rgbCss(mixRgb(pal.bd, pal.wat, 0.25), piers * 0.78)
-      const nPiers = 38
-      for (let i = 0; i < nPiers; i++) {
-        const wx = 0.008 + (i / nPiers) * 0.44
-        const px = sx(wx)
-        if (px < -10 || px > W + 10) continue
-        const pw = Math.max(1, 0.0012 * cam.ppwx)
-        const ph = Math.max(2, 16 * cam.ppft * piers)
-        ctx!.fillRect(px - pw / 2, hz - ph * 0.35, pw, ph)
+    // NYC-specific Central Park canopy & historic East River finger piers
+    if (activeCity.id === "nyc") {
+      const park = smoothstep(1858, 1874, year)
+      if (park > 0.01) {
+        const p0 = sx(0.45)
+        const p1 = sx(0.65)
+        if (p1 > 0 && p0 < W) {
+          ctx!.save()
+          ctx!.globalAlpha = park * 0.65
+          ctx!.fillStyle = rgbCss(mixRgb(pal.bd, [32, 62, 44], 0.56))
+          ctx!.beginPath()
+          ctx!.moveTo(p0, hz)
+          for (let i = 0; i <= 32; i++) {
+            const x = lerp(p0, p1, i / 32)
+            const h = (18 + Math.sin(i * 1.9) * 8 + Math.cos(i * 3.1) * 5) * park
+            ctx!.lineTo(x, sy(h))
+          }
+          ctx!.lineTo(p1, hz)
+          ctx!.closePath()
+          ctx!.fill()
+          ctx!.restore()
+        }
       }
-      ctx!.restore()
+
+      const piers =
+        smoothstep(1820, 1880, year) * (1 - smoothstep(1965, 2005, year) * 0.72)
+      if (piers > 0.01) {
+        ctx!.save()
+        ctx!.fillStyle = rgbCss(mixRgb(pal.bd, pal.wat, 0.25), piers * 0.78)
+        const nPiers = 38
+        for (let i = 0; i < nPiers; i++) {
+          const wx = 0.008 + (i / nPiers) * 0.44
+          const px = sx(wx)
+          if (px < -10 || px > W + 10) continue
+          const pw = Math.max(1, 0.0012 * cam.ppwx)
+          const ph = Math.max(2, 16 * cam.ppft * piers)
+          ctx!.fillRect(px - pw / 2, hz - ph * 0.35, pw, ph)
+        }
+        ctx!.restore()
+      }
     }
   }
 
@@ -600,6 +791,93 @@ export function initSkylineRenderer(
     const baseCol = mixRgb(pal.bd, pal.hor, depthMix)
     const litCol = mixRgb(pal.bdLit, pal.hor, depthMix * 0.72)
 
+    // Special vector drawing for London Eye (rotating spoked observation wheel)
+    if (b.type === "ferris") {
+      ctx!.save()
+      if (fade < 1) ctx!.globalAlpha = fade
+      const wheelR = curH * 0.44
+      const wheelCy = baseY - curH * 0.54
+      const rimCol = mixRgb(litCol, [238, 244, 255], 0.35 + nightness * 0.35)
+
+      // A-frame riverfront support legs
+      ctx!.strokeStyle = rgbCss(baseCol)
+      ctx!.lineWidth = Math.max(1.4, wheelR * 0.085)
+      ctx!.beginPath()
+      ctx!.moveTo(x - wheelR * 0.44, baseY)
+      ctx!.lineTo(x, wheelCy)
+      ctx!.lineTo(x + wheelR * 0.44, baseY)
+      ctx!.stroke()
+
+      // Outer structural wheel rim
+      ctx!.strokeStyle = rgbCss(rimCol, 0.85)
+      ctx!.lineWidth = Math.max(1.4, wheelR * 0.068)
+      ctx!.beginPath()
+      ctx!.arc(x, wheelCy, wheelR, 0, Math.PI * 2)
+      ctx!.stroke()
+
+      // Inner tension ring
+      ctx!.strokeStyle = rgbCss(rimCol, 0.5)
+      ctx!.lineWidth = Math.max(0.8, wheelR * 0.03)
+      ctx!.beginPath()
+      ctx!.arc(x, wheelCy, wheelR * 0.84, 0, Math.PI * 2)
+      ctx!.stroke()
+
+      // Rotating spokes & passenger capsules
+      const rot = reduceMotion ? 0 : timeSec * 0.08
+      const spokes = 16
+      ctx!.strokeStyle = rgbCss(rimCol, 0.35)
+      ctx!.lineWidth = Math.max(0.5, wheelR * 0.015)
+      for (let i = 0; i < spokes; i++) {
+        const ang = rot + (i / spokes) * Math.PI * 2
+        ctx!.beginPath()
+        ctx!.moveTo(x, wheelCy)
+        ctx!.lineTo(x + Math.cos(ang) * wheelR, wheelCy + Math.sin(ang) * wheelR)
+        ctx!.stroke()
+      }
+
+      // 24 capsules around rim (warm/indigo glow at night)
+      const capCount = 24
+      for (let i = 0; i < capCount; i++) {
+        const ang = rot + (i / capCount) * Math.PI * 2
+        const cx2 = x + Math.cos(ang) * (wheelR * 1.03)
+        const cy2 = wheelCy + Math.sin(ang) * (wheelR * 1.03)
+        ctx!.fillStyle =
+          nightness > 0.25
+            ? `rgba(210,230,255,${0.45 + nightness * 0.48})`
+            : rgbCss(rimCol, 0.8)
+        ctx!.beginPath()
+        ctx!.arc(cx2, cy2, Math.max(1, wheelR * 0.042), 0, Math.PI * 2)
+        ctx!.fill()
+      }
+
+      // Central hub
+      ctx!.fillStyle = rgbCss(rimCol, 0.92)
+      ctx!.beginPath()
+      ctx!.arc(x, wheelCy, Math.max(1.8, wheelR * 0.09), 0, Math.PI * 2)
+      ctx!.fill()
+
+      // Soft nocturnal wheel halo
+      if (nightness > 0.22) {
+        const wg = ctx!.createRadialGradient(x, wheelCy, wheelR * 0.65, x, wheelCy, wheelR * 1.35)
+        wg.addColorStop(0, `rgba(190,214,255,${nightness * 0.22})`)
+        wg.addColorStop(1, "rgba(190,214,255,0)")
+        ctx!.fillStyle = wg
+        ctx!.beginPath()
+        ctx!.arc(x, wheelCy, wheelR * 1.35, 0, Math.PI * 2)
+        ctx!.fill()
+      }
+
+      if (b.isHero && spotlight && spotlight.id === b.id) {
+        ctx!.strokeStyle = "rgba(255,214,146,0.78)"
+        ctx!.lineWidth = 1.6
+        ctx!.beginPath()
+        ctx!.arc(x, wheelCy, wheelR * 1.08, 0, Math.PI * 2)
+        ctx!.stroke()
+      }
+      ctx!.restore()
+      return
+    }
+
     ctx!.save()
     if (fade < 1) ctx!.globalAlpha = fade
 
@@ -623,6 +901,53 @@ export function initSkylineRenderer(
     ctx!.fillStyle = bodyGrad
     ctx!.fill()
 
+    // Open architectural portals/arches punched cleanly with sky/horizon tone
+    if ((b.type === "eiffel" || b.type === "tokyotower") && w > 5) {
+      ctx!.save()
+      const archCol = mixRgb(pal.hor, pal.mid, 0.25)
+      ctx!.fillStyle = rgbCss(archCol, 0.86)
+      ctx!.beginPath()
+      ctx!.moveTo(x - w * 0.26, baseY + 1)
+      ctx!.quadraticCurveTo(x, baseY - curH * 0.26, x + w * 0.26, baseY + 1)
+      ctx!.closePath()
+      ctx!.fill()
+
+      // Open iron lattice cross-bracing shimmer
+      ctx!.strokeStyle =
+        b.type === "tokyotower" && nightness > 0.25
+          ? `rgba(255,142,84,${nightness * 0.72})`
+          : b.type === "eiffel" && nightness > 0.25
+            ? `rgba(255,212,138,${nightness * 0.56})`
+            : rgbCss(litCol, 0.26)
+      ctx!.lineWidth = Math.max(0.65, w * 0.025)
+      const deck1 = baseY - curH * 0.21
+      const deck2 = baseY - curH * 0.44
+      ctx!.beginPath()
+      ctx!.moveTo(x - w * 0.34, deck1)
+      ctx!.lineTo(x + w * 0.34, deck1)
+      ctx!.moveTo(x - w * 0.21, deck2)
+      ctx!.lineTo(x + w * 0.21, deck2)
+      ctx!.stroke()
+      ctx!.restore()
+    } else if (b.type === "triomphe" && w > 4) {
+      ctx!.fillStyle = rgbCss(mixRgb(pal.hor, pal.mid, 0.2), 0.85)
+      ctx!.beginPath()
+      ctx!.moveTo(x - w * 0.19, baseY + 1)
+      ctx!.lineTo(x - w * 0.19, baseY - curH * 0.42)
+      ctx!.quadraticCurveTo(x, baseY - curH * 0.64, x + w * 0.19, baseY - curH * 0.42)
+      ctx!.lineTo(x + w * 0.19, baseY + 1)
+      ctx!.closePath()
+      ctx!.fill()
+    } else if (b.type === "archcube" && w > 4) {
+      ctx!.fillStyle = rgbCss(mixRgb(pal.hor, pal.mid, 0.25), 0.88)
+      ctx!.fillRect(
+        x - w * 0.26,
+        baseY - curH * 0.78,
+        w * 0.52,
+        curH * 0.68
+      )
+    }
+
     // 2.5D Sunward architectural chamfer highlight (shifts left -> right with diurnal sun)
     const sunSide = p < 0.42 ? -1 : 1
     const rimStrength = clamp(0.14 + (1 - nightness) * 0.34, 0.14, 0.46)
@@ -634,12 +959,7 @@ export function initSkylineRenderer(
       // Lit bevel strip on the sunward side of the tower
       const bevelW = Math.max(1, w * (b.isHero ? 0.24 : 0.18))
       const bx = sunSide < 0 ? x - w * 0.5 : x + w * 0.5 - bevelW
-      const bevelGrad = ctx!.createLinearGradient(
-        bx,
-        0,
-        bx + bevelW,
-        0
-      )
+      const bevelGrad = ctx!.createLinearGradient(bx, 0, bx + bevelW, 0)
       if (sunSide < 0) {
         bevelGrad.addColorStop(0, rgbCss(litCol, rimStrength))
         bevelGrad.addColorStop(1, rgbCss(litCol, 0))
@@ -658,7 +978,19 @@ export function initSkylineRenderer(
         b.type === "cpt" ||
         b.type === "one57" ||
         b.type === "vanderbilt" ||
-        b.type === "bofa"
+        b.type === "bofa" ||
+        b.type === "shard" ||
+        b.type === "gherkin" ||
+        b.type === "walkie" ||
+        b.type === "cheesegrater" ||
+        b.type === "boc" ||
+        b.type === "ifc2" ||
+        b.type === "icc" ||
+        b.type === "centralplaza" ||
+        b.type === "thecenter" ||
+        b.type === "azabudai" ||
+        b.type === "cocoon" ||
+        b.type === "faceted"
       if (isGlass && w > 3.5) {
         const gGrad = ctx!.createLinearGradient(x - w * 0.5, topY, x + w * 0.5, baseY)
         gGrad.addColorStop(0, rgbCss(pal.hor, 0.18 * (1 - nightness * 0.5)))
@@ -694,28 +1026,105 @@ export function initSkylineRenderer(
         }
       }
 
-      // Night windows clipped cleanly inside the building silhouette!
-      const litThreshold =
-        nightness *
-        (b.isHero ? 0.96 : 0.78) *
-        (1 - arrowDim * (b.isHero && b.id === "esb" ? 0.78 : 0.68))
+      // Gherkin / Cocoon Tower curving diagrid lines
+      if ((b.type === "gherkin" || b.type === "cocoon") && w > 5) {
+        ctx!.strokeStyle =
+          nightness > 0.3
+            ? `rgba(218,236,255,${nightness * 0.34})`
+            : rgbCss(litCol, 0.24)
+        ctx!.lineWidth = 0.7
+        for (let step = 0.12; step < 0.92; step += 0.18) {
+          const y0 = baseY - curH * step
+          const y1 = baseY - curH * (step + 0.18)
+          ctx!.beginPath()
+          ctx!.moveTo(x - w * 0.48, y0)
+          ctx!.lineTo(x + w * 0.48, y1)
+          ctx!.moveTo(x + w * 0.48, y0)
+          ctx!.lineTo(x - w * 0.48, y1)
+          ctx!.stroke()
+        }
+      }
 
-      if (litThreshold > 0.05 && w > 3 && curH > 12 && b.type !== "liberty") {
+      // Bank of China Tower (Hong Kong): iconic luminous X-truss triangular prisms
+      if (b.type === "boc" && w > 4) {
+        ctx!.strokeStyle =
+          nightness > 0.22
+            ? `rgba(220,244,255,${0.32 + nightness * 0.62})`
+            : rgbCss(litCol, 0.34)
+        ctx!.lineWidth = Math.max(0.85, w * 0.045)
+        const levels = [0.0, 0.24, 0.46, 0.66, 0.84]
+        for (let i = 0; i < levels.length - 1; i++) {
+          const y0 = baseY - curH * levels[i]
+          const y1 = baseY - curH * levels[i + 1]
+          ctx!.beginPath()
+          ctx!.moveTo(x - w * 0.48, y0)
+          ctx!.lineTo(x + w * 0.48, y1)
+          ctx!.moveTo(x + w * 0.48, y0)
+          ctx!.lineTo(x - w * 0.48, y1)
+          ctx!.moveTo(x - w * 0.48, y1)
+          ctx!.lineTo(x + w * 0.48, y1)
+          ctx!.stroke()
+        }
+      }
+
+      // HSBC Building (Hong Kong): exposed structural steel coat-hanger trusses
+      if (b.type === "hsbc" && w > 5) {
+        ctx!.strokeStyle =
+          nightness > 0.22
+            ? `rgba(218,236,255,${0.25 + nightness * 0.45})`
+            : rgbCss(litCol, 0.36)
+        ctx!.lineWidth = Math.max(0.75, w * 0.036)
+        for (const frac of [0.24, 0.46, 0.68, 0.86]) {
+          const ty = baseY - curH * frac
+          ctx!.beginPath()
+          ctx!.moveTo(x - w * 0.46, ty)
+          ctx!.lineTo(x + w * 0.46, ty)
+          ctx!.moveTo(x - w * 0.34, ty)
+          ctx!.lineTo(x, ty - curH * 0.09)
+          ctx!.lineTo(x + w * 0.34, ty)
+          ctx!.stroke()
+        }
+      }
+
+      // Night windows clipped cleanly inside the building silhouette!
+      const skipWindows =
+        b.type === "liberty" ||
+        b.type === "eiffel" ||
+        b.type === "tokyotower" ||
+        b.type === "skytree" ||
+        b.type === "triomphe" ||
+        b.type === "bt"
+      const litThreshold = nightness * (b.isHero ? 0.96 : 0.78)
+
+      if (litThreshold > 0.05 && w > 3 && curH > 12 && !skipWindows) {
         drawWindowsClipped(b, x, w, topY, baseY, curH, litThreshold, isGlass)
       }
 
       // 432 Park Avenue iconic open glowing mechanical wind floors
       if (b.type === "p432" && nightness > 0.2 && curH > 30) {
-        ctx!.fillStyle = `rgba(255,232,196,${nightness * 0.58 * (1 - arrowDim * 0.5)})`
+        ctx!.fillStyle = `rgba(255,232,196,${nightness * 0.58})`
         for (const frac of [0.22, 0.4, 0.58, 0.76, 0.91]) {
           const fy = baseY - curH * frac
           ctx!.fillRect(x - w * 0.46, fy, w * 0.92, Math.max(1.2, curH * 0.012))
         }
       }
 
-      // Illuminated Art Deco & Supertall Night Crowns
+      // Big Ben glowing circular warm clock face dial
+      if (b.type === "bigben" && curH > 20) {
+        const cy = baseY - curH * 0.71
+        const cr = Math.max(1.8, w * 0.28)
+        ctx!.fillStyle =
+          nightness > 0.2
+            ? `rgba(255,236,184,${0.55 + nightness * 0.42})`
+            : "rgba(248,242,226,0.72)"
+        ctx!.beginPath()
+        ctx!.arc(x, cy, cr, 0, Math.PI * 2)
+        ctx!.fill()
+      }
+
+      // Illuminated Landmark Night Crowns & Lattice Spires
       if (b.isHero && b.crownGlow && nightness > 0.18 && rise > 0.9) {
-        drawHeroCrownGlow(b, x, w, baseY, curH, nightness * (1 - arrowDim * 0.55))
+        drawHeroCrownGlow(b, x, w, baseY, curH, nightness, timeSec)
       }
 
       ctx!.restore()
@@ -790,6 +1199,45 @@ export function initSkylineRenderer(
       ctx!.beginPath()
       ctx!.arc(torchX, torchY, torchR, 0, Math.PI * 2)
       ctx!.fill()
+    }
+
+    // Eiffel Tower rotating golden nocturnal lighthouse beam (outside silhouette clip)
+    if (b.isHero && b.type === "eiffel" && nightness > 0.28 && rise > 0.92) {
+      const tipY = baseY - curH * 0.94
+      const beamLen = Math.max(85, curH * 0.88)
+      const sweep = reduceMotion ? 0.35 : Math.sin(timeSec * 0.65)
+      const beamW = Math.max(12, beamLen * 0.14)
+      ctx!.save()
+      for (const dir of [-1, 1]) {
+        const endX = x + dir * beamLen * (0.45 + 0.55 * Math.abs(sweep))
+        const endY = tipY - beamLen * 0.12 * sweep * dir
+        const bg = ctx!.createLinearGradient(x, tipY, endX, endY)
+        bg.addColorStop(0, `rgba(255,236,184,${nightness * 0.38})`)
+        bg.addColorStop(0.55, `rgba(255,222,158,${nightness * 0.12})`)
+        bg.addColorStop(1, "rgba(255,222,158,0)")
+        ctx!.fillStyle = bg
+        ctx!.beginPath()
+        ctx!.moveTo(x, tipY)
+        ctx!.lineTo(endX, endY - beamW * 0.5)
+        ctx!.lineTo(endX, endY + beamW * 0.5)
+        ctx!.closePath()
+        ctx!.fill()
+      }
+      ctx!.restore()
+    }
+
+    // HSBC twin rooftop maintenance cranes
+    if (b.isHero && b.type === "hsbc" && rise > 0.92 && w > 5) {
+      ctx!.strokeStyle = rgbCss(litCol, 0.55)
+      ctx!.lineWidth = Math.max(0.8, w * 0.03)
+      for (const dir of [-1, 1]) {
+        const cx2 = x + dir * w * 0.24
+        ctx!.beginPath()
+        ctx!.moveTo(cx2, topY)
+        ctx!.lineTo(cx2, topY - curH * 0.06)
+        ctx!.lineTo(cx2 + dir * w * 0.22, topY - curH * 0.09)
+        ctx!.stroke()
+      }
     }
 
     // FAA Red Aviation Obstruction Beacons on Supertalls at night
@@ -879,9 +1327,88 @@ export function initSkylineRenderer(
     w: number,
     baseY: number,
     curH: number,
-    strength: number
+    strength: number,
+    timeSec: number
   ) {
     const col = b.crownGlow ?? [255, 224, 168]
+
+    if (b.type === "eiffel") {
+      // Golden floodlit ironwork + Paris hourly-style diamond twinkle
+      const g = ctx!.createLinearGradient(x, baseY - curH, x, baseY)
+      g.addColorStop(0, rgbCss([255, 224, 152], strength * 0.72))
+      g.addColorStop(0.55, rgbCss([255, 198, 114], strength * 0.5))
+      g.addColorStop(1, rgbCss([255, 178, 92], strength * 0.22))
+      ctx!.fillStyle = g
+      ctx!.fillRect(x - w * 0.5, baseY - curH, w, curH)
+
+      // Twinkling sparkle dots across the lattice
+      ctx!.fillStyle = `rgba(255,248,224,${strength * 0.92})`
+      for (let i = 0; i < 22; i++) {
+        const phase = reduceMotion ? 1 : Math.sin(timeSec * 5.2 + i * 2.7)
+        if (phase < 0.28) continue
+        const fy = 0.16 + hash(i, 41) * 0.72
+        const halfW = (1 - fy * 0.85) * w * 0.36
+        const sx2 = x + (hash(i, 43) - 0.5) * 2 * halfW
+        const sy2 = baseY - curH * fy
+        ctx!.fillRect(sx2 - 0.7, sy2 - 0.7, 1.4, 1.4)
+      }
+      return
+    }
+
+    if (b.type === "tokyotower") {
+      // Iconic vermilion-orange nocturnal illumination
+      const g = ctx!.createLinearGradient(x, baseY - curH, x, baseY)
+      g.addColorStop(0, rgbCss([255, 146, 84], strength * 0.78))
+      g.addColorStop(0.5, rgbCss([255, 118, 62], strength * 0.6))
+      g.addColorStop(1, rgbCss([255, 96, 48], strength * 0.28))
+      ctx!.fillStyle = g
+      ctx!.fillRect(x - w * 0.5, baseY - curH, w, curH)
+
+      // Bright Main & Top observation decks
+      ctx!.fillStyle = `rgba(255,242,208,${strength * 0.92})`
+      ctx!.fillRect(x - w * 0.24, baseY - curH * 0.45, w * 0.48, Math.max(1.5, curH * 0.018))
+      ctx!.fillRect(x - w * 0.13, baseY - curH * 0.73, w * 0.26, Math.max(1.4, curH * 0.016))
+      return
+    }
+
+    if (b.type === "skytree") {
+      // Edo-indigo / pale cyan illumination + glowing twin Tembo decks
+      const g = ctx!.createLinearGradient(x, baseY - curH, x, baseY)
+      g.addColorStop(0, rgbCss([196, 224, 255], strength * 0.68))
+      g.addColorStop(0.6, rgbCss([168, 198, 255], strength * 0.34))
+      g.addColorStop(1, rgbCss([148, 178, 245], strength * 0.1))
+      ctx!.fillStyle = g
+      ctx!.fillRect(x - w * 0.5, baseY - curH, w, curH)
+
+      ctx!.fillStyle = `rgba(232,246,255,${strength * 0.95})`
+      ctx!.fillRect(x - w * 0.26, baseY - curH * 0.56, w * 0.52, Math.max(1.8, curH * 0.018))
+      ctx!.fillRect(x - w * 0.19, baseY - curH * 0.71, w * 0.38, Math.max(1.5, curH * 0.015))
+      return
+    }
+
+    if (b.type === "shard") {
+      // Luminous fractured silver-white spire wash
+      const g = ctx!.createLinearGradient(x, baseY - curH, x, baseY - curH * 0.55)
+      g.addColorStop(0, rgbCss([236, 244, 255], strength * 0.85))
+      g.addColorStop(0.55, rgbCss([204, 222, 255], strength * 0.36))
+      g.addColorStop(1, rgbCss([204, 222, 255], 0))
+      ctx!.fillStyle = g
+      ctx!.fillRect(x - w * 0.5, baseY - curH, w, curH * 0.45)
+      return
+    }
+
+    if (b.type === "centralplaza" || b.type === "thecenter") {
+      // Tiered harbour neon crown bands
+      const bands = [0.76, 0.82, 0.88, 0.93]
+      for (let i = 0; i < bands.length; i++) {
+        const by = baseY - curH * bands[i]
+        const bw = w * (0.68 - i * 0.12)
+        const c = i % 2 === 0 ? col : ([212, 238, 255] as const)
+        ctx!.fillStyle = rgbCss(c, strength * 0.84)
+        ctx!.fillRect(x - bw / 2, by, bw, Math.max(1.4, curH * 0.014))
+      }
+      return
+    }
 
     if (b.type === "chrysler") {
       // Chrysler Building iconic illuminated Art Deco sunburst arches
@@ -996,13 +1523,13 @@ export function initSkylineRenderer(
   }
 
   // ---------------------------------------------------------------------------
-  // East River Bridges + Pearl-Necklace Night Cable Lights
+  // River & Harbour Bridges (Suspension, Arch, Tower Bridge, Cable-Stay, Cantilever)
   // ---------------------------------------------------------------------------
   function drawBridges(year: number, pal: Palette, nightness: number) {
     const col = mixRgb(pal.bd, pal.hor, 0.14)
     const litCol = mixRgb(pal.bdLit, pal.hor, 0.22)
 
-    for (const br of BRIDGES) {
+    for (const br of activeCity.bridges) {
       const k = smoothstep(br.built - 2, br.built + 2.5, year)
       if (k <= 0.01) continue
       const cx = sx(br.x)
@@ -1012,7 +1539,7 @@ export function initSkylineRenderer(
 
       const deckY = sy(br.deckH)
       const topY = sy(br.towerH)
-      const tw = Math.max(2.2, sp * (br.style === "stone" ? 0.068 : 0.044))
+      const tw = Math.max(2.2, sp * (br.style === "stone" || br.style === "towerbridge" ? 0.068 : 0.044))
       const t1 = cx - sp * 0.32
       const t2 = cx + sp * 0.32
       const leftEnd = cx - sp * 0.72
@@ -1023,7 +1550,151 @@ export function initSkylineRenderer(
       ctx!.fillStyle = rgbCss(col)
       ctx!.strokeStyle = rgbCss(col)
 
-      // Roadway deck
+      if (br.style === "arch") {
+        // Classic masonry/iron multi-arch European river bridge (Seine / Thames)
+        const nArches = sp > 90 ? 5 : 3
+        const spanW = rightEnd - leftEnd
+        const archW = spanW / nArches
+        ctx!.fillStyle = rgbCss(col)
+        ctx!.fillRect(leftEnd, deckY - 1.5, spanW, Math.max(2.4, (hz - deckY) * 0.24))
+
+        for (let i = 0; i <= nArches; i++) {
+          const px = leftEnd + i * archW
+          const pw = Math.max(2, archW * 0.16)
+          ctx!.fillRect(px - pw / 2, deckY, pw, hz - deckY)
+        }
+        ctx!.lineWidth = Math.max(1.2, sp * 0.015)
+        for (let i = 0; i < nArches; i++) {
+          const ax0 = leftEnd + i * archW
+          const ax1 = ax0 + archW
+          ctx!.beginPath()
+          ctx!.moveTo(ax0, hz)
+          ctx!.quadraticCurveTo((ax0 + ax1) / 2, deckY - (hz - deckY) * 0.12, ax1, hz)
+          ctx!.stroke()
+        }
+
+        // Warm riverside bridge lamps along the stone parapet at night
+        if (br.necklaceLights && nightness > 0.22 && sp > 24) {
+          ctx!.fillStyle = `rgba(255,226,162,${nightness * 0.92})`
+          for (let i = 0; i <= nArches; i++) {
+            const lx = leftEnd + i * archW
+            ctx!.beginPath()
+            ctx!.arc(lx, deckY - 3, Math.max(1, Math.min(1.8, sp * 0.01)), 0, Math.PI * 2)
+            ctx!.fill()
+          }
+        }
+        ctx!.restore()
+        continue
+      }
+
+      if (br.style === "towerbridge") {
+        // London Tower Bridge: twin Victorian Gothic towers + high-level double walkways + bascule span
+        const walkY1 = lerp(topY, deckY, 0.24)
+        const walkY2 = lerp(topY, deckY, 0.34)
+        ctx!.lineWidth = Math.max(1.5, sp * 0.022)
+        ctx!.beginPath()
+        ctx!.moveTo(leftEnd, deckY)
+        ctx!.lineTo(rightEnd, deckY)
+        ctx!.stroke()
+
+        // High-level twin horizontal steel walkways
+        ctx!.lineWidth = Math.max(1.2, sp * 0.014)
+        ctx!.beginPath()
+        ctx!.moveTo(t1, walkY1)
+        ctx!.lineTo(t2, walkY1)
+        ctx!.moveTo(t1, walkY2)
+        ctx!.lineTo(t2, walkY2)
+        ctx!.stroke()
+
+        // Side suspension chains curving down to shore abutments
+        ctx!.lineWidth = Math.max(1, sp * 0.012)
+        ctx!.beginPath()
+        ctx!.moveTo(leftEnd, deckY)
+        ctx!.quadraticCurveTo((leftEnd + t1) * 0.5, deckY, t1, walkY1)
+        ctx!.moveTo(t2, walkY1)
+        ctx!.quadraticCurveTo((t2 + rightEnd) * 0.5, deckY, rightEnd, deckY)
+        ctx!.stroke()
+
+        // Twin pointed-roof Gothic stone towers
+        for (const tx of [t1, t2]) {
+          ctx!.fillStyle = rgbCss(col)
+          ctx!.fillRect(tx - tw / 2, topY + tw * 0.75, tw, hz - (topY + tw * 0.75))
+          ctx!.beginPath()
+          ctx!.moveTo(tx - tw * 0.56, topY + tw * 0.78)
+          ctx!.lineTo(tx, topY)
+          ctx!.lineTo(tx + tw * 0.56, topY + tw * 0.78)
+          ctx!.closePath()
+          ctx!.fill()
+
+          if (nightness > 0.22) {
+            ctx!.fillStyle = `rgba(255,222,158,${nightness * 0.55})`
+            ctx!.fillRect(tx - tw * 0.36, topY + tw * 0.75, tw * 0.72, (deckY - topY) * 0.65)
+          }
+        }
+
+        // Illuminated walkway & chain pearls at night
+        if (br.necklaceLights && nightness > 0.22 && sp > 24) {
+          ctx!.fillStyle = `rgba(255,232,178,${nightness * 0.92})`
+          for (let i = 1; i <= 7; i++) {
+            const bx = lerp(t1, t2, i / 8)
+            ctx!.beginPath()
+            ctx!.arc(bx, walkY1, 1.1, 0, Math.PI * 2)
+            ctx!.fill()
+          }
+        }
+        ctx!.restore()
+        continue
+      }
+
+      if (br.style === "cablestay") {
+        // Modern cable-stayed twin pylon span (Stonecutters Bridge)
+        ctx!.lineWidth = Math.max(1.4, sp * 0.02)
+        ctx!.beginPath()
+        ctx!.moveTo(leftEnd, deckY)
+        ctx!.quadraticCurveTo(cx, deckY - (hz - deckY) * 0.1, rightEnd, deckY)
+        ctx!.stroke()
+
+        for (const tx of [t1, t2]) {
+          // Slender tapering single-mast concrete & stainless pylon
+          ctx!.fillStyle = rgbCss(col)
+          ctx!.beginPath()
+          ctx!.moveTo(tx - tw * 0.55, hz)
+          ctx!.lineTo(tx - tw * 0.22, topY)
+          ctx!.lineTo(tx + tw * 0.22, topY)
+          ctx!.lineTo(tx + tw * 0.55, hz)
+          ctx!.closePath()
+          ctx!.fill()
+
+          // Fan stay cables
+          ctx!.strokeStyle =
+            nightness > 0.25
+              ? `rgba(206,232,255,${nightness * 0.42})`
+              : rgbCss(litCol, 0.45)
+          ctx!.lineWidth = Math.max(0.55, sp * 0.005)
+          for (let s = 1; s <= 6; s++) {
+            const frac = s / 6
+            const py = lerp(topY + 4, lerp(topY, deckY, 0.36), frac)
+            const spanReach = sp * 0.34 * frac
+            ctx!.beginPath()
+            ctx!.moveTo(tx, py)
+            ctx!.lineTo(tx - spanReach, deckY)
+            ctx!.moveTo(tx, py)
+            ctx!.lineTo(tx + spanReach, deckY)
+            ctx!.stroke()
+          }
+
+          if (nightness > 0.28) {
+            ctx!.fillStyle = `rgba(218,240,255,${nightness * 0.9})`
+            ctx!.beginPath()
+            ctx!.arc(tx, topY, 1.5, 0, Math.PI * 2)
+            ctx!.fill()
+          }
+        }
+        ctx!.restore()
+        continue
+      }
+
+      // Roadway deck for suspension & cantilever spans
       ctx!.lineWidth = Math.max(1.4, sp * 0.022)
       ctx!.beginPath()
       ctx!.moveTo(leftEnd, deckY)
@@ -1174,9 +1845,10 @@ export function initSkylineRenderer(
   }
 
   // ---------------------------------------------------------------------------
-  // Tribute in Light (Quiet Memorial Beams 2001–2011)
+  // Tribute in Light (NYC Quiet Memorial Beams 2001–2011)
   // ---------------------------------------------------------------------------
   function drawTribute(year: number) {
+    if (activeCity.id !== "nyc") return
     const t = smoothstep(2001, 2003, year) * (1 - smoothstep(2006, 2012, year))
     if (t <= 0.01) return
     ctx!.save()
@@ -1482,119 +2154,13 @@ export function initSkylineRenderer(
   }
 
   // ---------------------------------------------------------------------------
-  // Signature Empire State Glowing Window + Hand-Drawn Arrow & Greeting
-  // ---------------------------------------------------------------------------
-  function scribble(
-    fromX: number,
-    fromY: number,
-    toX: number,
-    toY: number,
-    t: number,
-    arc: number
-  ) {
-    const steps = 32
-    const span = Math.hypot(toX - fromX, toY - fromY)
-    const at = (f: number): [number, number] => [
-      lerp(fromX, toX, f) + Math.sin(f * 7.3) * 2.8,
-      lerp(fromY, toY, f) +
-        Math.sin(f * 5.1 + 1.2) * 3 -
-        Math.sin(f * Math.PI) * span * arc,
-    ]
-
-    ctx!.beginPath()
-    const drawTo = Math.floor(steps * clamp(t * 1.3, 0, 1))
-    for (let i = 0; i <= drawTo; i++) {
-      const [px, py] = at(i / steps)
-      if (i === 0) ctx!.moveTo(px, py)
-      else ctx!.lineTo(px, py)
-    }
-    ctx!.stroke()
-
-    const [ex, ey] = at(1)
-    const [bx, by] = at(0.92)
-    return { x: ex, y: ey, angle: Math.atan2(ey - by, ex - bx) }
-  }
-
-  function drawGreeting(t: number) {
-    if (t <= 0.01) return
-    const tx = sx(GREETING.x)
-    const ty = sy(GREETING.ft)
-    const wsz = Math.max(5.5, 0.00095 * cam.ppwx)
-
-    // Warm tungsten window halo
-    ctx!.save()
-    const halo = ctx!.createRadialGradient(tx, ty, 0, tx, ty, wsz * 5.5)
-    halo.addColorStop(0, `rgba(255,212,138,${t * 0.58})`)
-    halo.addColorStop(0.5, `rgba(255,190,112,${t * 0.2})`)
-    halo.addColorStop(1, "rgba(255,190,112,0)")
-    ctx!.fillStyle = halo
-    ctx!.beginPath()
-    ctx!.arc(tx, ty, wsz * 5.5, 0, Math.PI * 2)
-    ctx!.fill()
-
-    // Crisp glowing window pane
-    ctx!.globalAlpha = t
-    ctx!.fillStyle = "rgb(255,222,158)"
-    ctx!.shadowColor = "rgba(255,196,118,0.95)"
-    ctx!.shadowBlur = 22
-    ctx!.fillRect(tx - wsz / 2, ty - wsz * 0.72, wsz, wsz * 1.44)
-    ctx!.restore()
-
-    const len = Math.min(W * 0.26, 168)
-    const side = tx > W * 0.56 ? -1 : 1
-    const ax = tx + side * len * 0.92
-    const ay = ty - len * 0.58
-
-    ctx!.save()
-    ctx!.globalAlpha = t
-    ctx!.strokeStyle = "rgba(252,238,214,0.94)"
-    ctx!.lineWidth = 2.1
-    ctx!.lineCap = "round"
-    const tip = scribble(ax, ay, tx + side * wsz * 1.15, ty - wsz * 0.35, t, 0.17)
-
-    if (t > 0.65) {
-      const headAlpha = clamp((t - 0.65) / 0.35, 0, 1)
-      ctx!.globalAlpha = t * headAlpha
-      const headSize = Math.max(10, wsz * 2.1)
-      ctx!.beginPath()
-      for (const spread of [2.5, -2.5]) {
-        ctx!.moveTo(tip.x, tip.y)
-        ctx!.lineTo(
-          tip.x + Math.cos(tip.angle + spread) * headSize,
-          tip.y + Math.sin(tip.angle + spread) * headSize
-        )
-      }
-      ctx!.stroke()
-
-      const px = isMobile ? clamp(W * 0.056, 21, 26) : clamp(W * 0.042, 24, 34)
-      const handFamily =
-        getComputedStyle(document.documentElement).getPropertyValue("--font-hand").trim() ||
-        "Caveat, cursive"
-      ctx!.font = `500 ${px}px ${handFamily}`
-      ctx!.fillStyle = "rgba(252,240,218,0.98)"
-      ctx!.shadowColor = "rgba(8,10,22,0.85)"
-      ctx!.shadowBlur = 16
-      ctx!.textAlign = "left"
-      const label = "Hi, I\u2019m Brandon"
-      const lw = ctx!.measureText(label).width
-      const edgePad = isMobile ? 24 : 32
-      const lx = clamp(
-        side > 0 ? ax + 6 : ax - lw - 6,
-        edgePad,
-        Math.max(edgePad, W - lw - edgePad)
-      )
-      ctx!.fillText(label, lx, ay - (isMobile ? 12 : 8))
-    }
-    ctx!.restore()
-  }
-
-  // ---------------------------------------------------------------------------
   // Caption Helper
   // ---------------------------------------------------------------------------
   function captionForYear(year: number): string {
     let best = ""
-    for (const c of ALL_CAPTIONS) {
-      if (year >= c.year && year - c.year < 6.2) best = c.text
+    const windowYears = activeCity.endYear - activeCity.startYear > 600 ? 18 : 6.5
+    for (const c of allCaptions) {
+      if (year >= c.year && year - c.year < windowYears) best = c.text
     }
     return best
   }
@@ -1611,7 +2177,7 @@ export function initSkylineRenderer(
       currentQ = targetQ
       smoothEnergy = 0
     } else {
-      const stepP = clamp((targetP - currentP) * CFG.smoothing, -0.05, 0.05)
+      const stepP = clamp((targetP - currentP) * ENGINE_CFG.smoothing, -0.05, 0.05)
       currentP += stepP
       if (Math.abs(targetP - currentP) < 0.00025) currentP = targetP
 
@@ -1635,7 +2201,7 @@ export function initSkylineRenderer(
       }
     }
 
-    const baseYear = yearAt(currentP)
+    const baseYear = yearAtForCity(activeCity, currentP)
     const activeP =
       lastSpot && spotBlend > 0.001
         ? lerp(currentP, lastSpot.p, spotBlend)
@@ -1646,30 +2212,34 @@ export function initSkylineRenderer(
         : baseYear
 
     const fr = frameAt(year)
-    const wideSpan = Math.min(CFG.finalSpan, fr.x1 - fr.x0)
-    let wideCx = fr.x0 + wideSpan / 2
-    if (fr.x1 - fr.x0 > CFG.finalSpan) wideCx = CFG.finalSpan / 2
+    const wideSpan = Math.min(activeCity.finalSpan, fr.x1 - fr.x0)
+    const wideCx = fr.x0 + wideSpan / 2
+    const widePpft = ((W / wideSpan) * EXAG) / activeCity.islandFt
+    const wideCy = (baselineY - H / 2) / widePpft
 
-    const rest = framingForStop(TOUR_STOPS[0])
-    const settle = glide(norm(0.86, 1, currentP))
+    const stops = activeCity.tourStops
     const touring = currentQ > 0.0005 && !spotlight
-    const tour = sampleTour(currentQ)
+    const tour = sampleTourForCity(activeCity, currentQ)
 
     let cx: number
     let span: number
     let cyFt: number
 
-    if (touring) {
-      const a = framingForStop(TOUR_STOPS[tour.from])
-      const b = framingForStop(TOUR_STOPS[tour.index])
-      cx = lerp(a.cx, b.cx, tour.move)
-      span = lerp(a.span, b.span, tour.move)
-      cyFt = lerp(a.cyFt, b.cyFt, tour.move)
+    if (touring && stops.length > 0) {
+      // Smoothly transition from wide panoramic horizon into Stop 0 on initial scroll
+      const entryBlend = smoothstep(0, 0.06, currentQ)
+      const a = framingForStop(stops[tour.from])
+      const b = framingForStop(stops[tour.index])
+      const tourCx = lerp(a.cx, b.cx, tour.move)
+      const tourSpan = lerp(a.span, b.span, tour.move)
+      const tourCy = lerp(a.cyFt, b.cyFt, tour.move)
+      cx = lerp(wideCx, tourCx, entryBlend)
+      span = lerp(wideSpan, tourSpan, entryBlend)
+      cyFt = lerp(wideCy, tourCy, entryBlend)
     } else {
-      cx = lerp(wideCx, rest.cx, settle)
-      span = lerp(wideSpan, rest.span, settle)
-      const wideCy = (baselineY - H / 2) / (((W / wideSpan) * EXAG) / CFG.islandFt)
-      cyFt = lerp(wideCy, rest.cyFt, settle)
+      cx = wideCx
+      span = wideSpan
+      cyFt = wideCy
     }
 
     if (lastSpot && spotBlend > 0.001) {
@@ -1685,12 +2255,6 @@ export function initSkylineRenderer(
     const pal = paletteAt(activeP)
     const nightness = smoothstep(0.64, 0.88, activeP)
 
-    const greetAlpha =
-      spotlight || spotBlend > 0.2
-        ? 0
-        : smoothstep(0.86, 0.985, currentP) * (touring ? tour.greet : 1)
-    arrowDim = greetAlpha * 0.56
-
     ctx!.setTransform(DPR, 0, 0, DPR, 0, 0)
     ctx!.fillStyle = rgbCss([8, 12, 28])
     ctx!.fillRect(0, 0, W, H)
@@ -1698,20 +2262,20 @@ export function initSkylineRenderer(
     // 1. Sky & celestial atmosphere
     drawSky(activeP, pal, timeSec, nightness)
 
-    // 2. Far New Jersey / Hudson Yards ridge & far-layer heroes
-    drawFarRidge(pal)
-    for (const h of HEROES) {
+    // 2. City-specific far backdrop (Palisades, Montmartre, Thames, Mount Fuji, Victoria Peak) & far-layer landmarks
+    drawFarBackdrop(pal, nightness)
+    for (const h of activeCity.heroes) {
       if (h.layer === "far") drawBuilding(h, year, pal, nightness, timeSec, activeP)
     }
 
-    // 3. Manhattan terrain, Lenape woods, Central Park & East River piers
+    // 3. Waterfront terrain & historic foliage
     drawLand(year, pal)
 
-    // 4. City massing fill + spine landmarks
-    for (const f of FILL) {
+    // 4. City massing fill + foreground landmark silhouettes
+    for (const f of fillBuildings) {
       drawBuilding(f, year, pal, nightness, timeSec, activeP)
     }
-    for (const h of HEROES) {
+    for (const h of activeCity.heroes) {
       if (h.layer !== "far") drawBuilding(h, year, pal, nightness, timeSec, activeP)
     }
 
@@ -1729,23 +2293,18 @@ export function initSkylineRenderer(
     ctx!.fillStyle = hg
     ctx!.fillRect(0, hz - H * 0.08, W, H * 0.08)
 
-    // 6. Tribute in Light + Bridges
+    // 6. Tribute in Light (NYC) + City Bridges
     drawTribute(year)
     drawBridges(year, pal, nightness)
 
-    // 7. Shimmering East River mirrored reflections + vessels
+    // 7. Shimmering mirrored river/harbor reflections + vessels
     drawWater(activeP, pal, year, nightness, timeSec)
 
-    // 8. Empire State glowing window + hand-drawn greeting
-    if (greetAlpha > 0.01) {
-      drawGreeting(greetAlpha)
-    }
-
     // Throttled HUD callback (~15fps or immediately on caption/stop change)
-    const roundedYear = touring ? 2026 : Math.round(year)
+    const roundedYear = touring ? activeCity.endYear : Math.round(year)
     const caption = spotlight
-      ? HEROES.find((h) => h.id === spotlight?.id)?.name ??
-        BRIDGES.find((b) => b.id === spotlight?.id)?.name ??
+      ? activeCity.heroes.find((h) => h.id === spotlight?.id)?.name ??
+        activeCity.bridges.find((b) => b.id === spotlight?.id)?.name ??
         ""
       : touring
         ? tour.subject
@@ -1764,14 +2323,13 @@ export function initSkylineRenderer(
         p: activeP,
         q: currentQ,
         year: roundedYear,
-        era: eraLabelForYear(roundedYear, touring),
+        era: eraLabelForCity(activeCity, roundedYear, touring),
         caption,
         touring,
         activeStopIndex: tour.activeIndex,
         stopOpacities: tour.opacities,
-        greetAlpha,
         spotlightId: spotlight?.id ?? null,
-        handoverHint: currentP > 0.97 && currentQ < 0.04 && !spotlight,
+        handoverHint: currentP >= 0.92 && currentQ < 0.03 && !spotlight,
       })
     }
 
@@ -1789,6 +2347,17 @@ export function initSkylineRenderer(
   rafId = requestAnimationFrame(renderFrame)
 
   return {
+    setCity(city: CityConfig) {
+      activeCity = city
+      frameAt = createFrameSampler(activeCity)
+      allCaptions = buildCaptionsForCity(activeCity)
+      fillBuildings = buildFillForCity(activeCity, fillCount)
+      spotlight = null
+      lastSpot = null
+      spotBlend = 0
+      lastCaptionKey = ""
+      lastStopKey = -1
+    },
     setProgress(p: number, q: number, immediate = false) {
       targetP = clamp(p, 0, 1)
       targetQ = clamp(q, 0, 1)
@@ -1807,7 +2376,7 @@ export function initSkylineRenderer(
       return {
         p: currentP,
         q: currentQ,
-        year: Math.round(yearAt(currentP)),
+        year: Math.round(yearAtForCity(activeCity, currentP)),
       }
     },
     destroy() {
